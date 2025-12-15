@@ -8,8 +8,15 @@ import (
 	"os"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 )
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
 
 func main() {
 	backendName := os.Getenv("BACKEND_NAME")
@@ -47,6 +54,34 @@ func main() {
 	// HTTP handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Hello from %s\n", backendName)
+	})
+
+	// WebSocket handler
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Println("WebSocket upgrade failed:", err)
+			return
+		}
+		defer conn.Close()
+
+		for {
+			mt, message, err := conn.ReadMessage()
+			if err != nil {
+				log.Println("WebSocket read error:", err)
+				break
+			}
+
+			if string(message) == "ping" {
+				conn.WriteMessage(mt, []byte("pong"))
+			} else {
+				response := fmt.Sprintf("%s echo: %s", backendName, string(message))
+				if err := conn.WriteMessage(mt, []byte(response)); err != nil {
+					log.Println("WebSocket write error:", err)
+					break
+				}
+			}
+		}
 	})
 
 	log.Printf("Starting backend %s on port %s\n", backendName, port)
