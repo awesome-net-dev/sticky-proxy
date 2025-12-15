@@ -10,6 +10,7 @@ type Proxy struct {
 	redis    *Redis
 	cache    *UserCache
 	backends *BackendManager
+	jwtCache *JWTCache
 }
 
 func New() (*Proxy, error) {
@@ -25,6 +26,7 @@ func New() (*Proxy, error) {
 		redis:    r,
 		cache:    NewUserCache(),
 		backends: b,
+		jwtCache: NewJWTCache(),
 	}, nil
 }
 
@@ -32,7 +34,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	atomic.AddUint64(&totalRequests, 1)
 
 	authHeader := r.Header.Get("Authorization")
-	jwtData, err := extractUserIDFromJWT(authHeader)
+	jwtData, err := extractUserIDFromJWT(authHeader, p.jwtCache)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
