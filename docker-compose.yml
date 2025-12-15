@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:latest
+    container_name: redis
+    restart: unless-stopped
+
+  backend1:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    container_name: backend1
+    environment:
+      BACKEND_NAME: backend1
+      PORT: "5678"
+      REDIS_ADDR: redis:6379
+    depends_on:
+      - redis
+
+  backend2:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    container_name: backend2
+    environment:
+      BACKEND_NAME: backend2
+      PORT: "5678"
+      REDIS_ADDR: redis:6379
+    depends_on:
+      - redis
+
+  backend3:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    container_name: backend3
+    environment:
+      BACKEND_NAME: backend3
+      PORT: "5678"
+      REDIS_ADDR: redis:6379
+    depends_on:
+      - redis
+
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sticky-proxy
+    ports:
+      - "8080:8080"
+    environment:
+      REDIS_ADDR: "redis:6379"
+      JWT_SECRET: "mysecret"
+      PROXY_PORT: "8080"
+    depends_on:
+      - redis
+      - backend1
+      - backend2
+      - backend3

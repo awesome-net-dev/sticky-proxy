@@ -20,19 +20,8 @@ var upgrader = websocket.Upgrader{
 
 func main() {
 	backendName := os.Getenv("BACKEND_NAME")
-	if backendName == "" {
-		backendName = "backend-default"
-	}
-
 	port := os.Getenv("PORT")
-	if port == "" {
-		port = "5678"
-	}
-
 	redisAddr := os.Getenv("REDIS_ADDR")
-	if redisAddr == "" {
-		redisAddr = "redis:6379"
-	}
 
 	ctx := context.Background()
 	rdb := redis.NewClient(&redis.Options{
