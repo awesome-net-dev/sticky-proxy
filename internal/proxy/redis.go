@@ -51,3 +51,8 @@ func (r *Redis) AssignBackend(
 
 	return res.(string), nil
 }
+
+// Ping checks if Redis is alive
+func (r *Redis) Ping() error {
+	return r.client.Ping(context.Background()).Err()
+}
