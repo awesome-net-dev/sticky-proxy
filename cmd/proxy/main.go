@@ -28,6 +28,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Start the active health checker in the background.
+	healthCtx, healthCancel := context.WithCancel(context.Background())
+	go p.HealthChecker.Start(healthCtx)
+
 	mux := http.NewServeMux()
 	mux.Handle("/", p)
 	mux.HandleFunc("/healthz", p.Healthz)
@@ -52,6 +56,9 @@ func main() {
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-quit
 	slog.Info("received signal, shutting down proxy", "signal", sig.String())
+
+	// Stop the health checker.
+	healthCancel()
 
 	// Give in-flight requests up to 30 seconds to complete.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

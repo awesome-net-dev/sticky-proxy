@@ -9,15 +9,15 @@ import (
 
 // Config holds all configuration values for the sticky-proxy.
 type Config struct {
-	ProxyPort           string
-	RedisAddr           string
-	JWTSecret           string
-	CacheTTL            time.Duration
-	RedisPoolSize       int
-	EvictionThreshold   int
-	EvictionCooldown    time.Duration
+	ProxyPort             string
+	RedisAddr             string
+	JWTSecret             string
+	CacheTTL              time.Duration
+	RedisPoolSize         int
+	EvictionThreshold     int
+	EvictionCooldown      time.Duration
 	BackendHealthInterval time.Duration
-	LogFormat           string
+	LogFormat             string
 }
 
 // Load reads configuration from environment variables and validates it.

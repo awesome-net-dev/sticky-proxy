@@ -67,3 +67,18 @@ func (r *Redis) AssignBackend(
 func (r *Redis) Ping() error {
 	return r.client.Ping(context.Background()).Err()
 }
+
+// ActiveBackends returns all members of the backends:active set.
+func (r *Redis) ActiveBackends(ctx context.Context) ([]string, error) {
+	return r.client.SMembers(ctx, "backends:active").Result()
+}
+
+// AddBackend adds a backend URL to the active set.
+func (r *Redis) AddBackend(ctx context.Context, backend string) error {
+	return r.client.SAdd(ctx, "backends:active", backend).Err()
+}
+
+// RemoveBackend removes a backend URL from the active set.
+func (r *Redis) RemoveBackend(ctx context.Context, backend string) error {
+	return r.client.SRem(ctx, "backends:active", backend).Err()
+}

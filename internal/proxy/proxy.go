@@ -11,11 +11,12 @@ import (
 )
 
 type Proxy struct {
-	redis     *Redis
-	cache     *UserCache
-	backends  *BackendManager
-	jwtCache  *JWTCache
-	jwtSecret []byte
+	redis         *Redis
+	cache         *UserCache
+	backends      *BackendManager
+	jwtCache      *JWTCache
+	jwtSecret     []byte
+	HealthChecker *HealthChecker
 }
 
 func New(cfg *config.Config) (*Proxy, error) {
@@ -30,11 +31,12 @@ func New(cfg *config.Config) (*Proxy, error) {
 	slog.Info("proxy initialized")
 
 	return &Proxy{
-		redis:     r,
-		cache:     NewUserCache(cfg.CacheTTL),
-		backends:  b,
-		jwtCache:  NewJWTCache(),
-		jwtSecret: []byte(cfg.JWTSecret),
+		redis:         r,
+		cache:         NewUserCache(cfg.CacheTTL),
+		backends:      b,
+		jwtCache:      NewJWTCache(),
+		jwtSecret:     []byte(cfg.JWTSecret),
+		HealthChecker: NewHealthChecker(r),
 	}, nil
 }
 

@@ -48,6 +48,12 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Health check endpoint (liveness probe)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
 	// HTTP handler
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Hello from %s\n", backendName)

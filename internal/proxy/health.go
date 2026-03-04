@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 )
@@ -11,6 +12,13 @@ func (p *Proxy) Healthz(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "redis down", http.StatusServiceUnavailable)
 		return
 	}
+
+	healthy := p.HealthChecker.HealthyCount()
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":           "ok",
+		"healthy_backends": healthy,
+	})
 }
