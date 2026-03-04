@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -11,12 +11,15 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
 	const totalUsers = 1000
 	secret := []byte(getEnv("JWT_SECRET", "mysecret"))
 
 	file, err := os.Create("users.csv")
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("failed to create output file", "error", err)
+		os.Exit(1)
 	}
 	defer file.Close()
 
@@ -33,19 +36,21 @@ func main() {
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 		signed, err := token.SignedString(secret)
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("failed to sign token", "userId", i, "error", err)
+			os.Exit(1)
 		}
 
 		if err := writer.Write([]string{fmt.Sprintf("%d", i), signed}); err != nil {
-			log.Fatal(err)
+			slog.Error("failed to write csv row", "userId", i, "error", err)
+			os.Exit(1)
 		}
 
 		if i%10000 == 0 {
-			fmt.Printf("Generated JWTs for %d users...\n", i)
+			slog.Info("generating jwts", "progress", i, "total", totalUsers)
 		}
 	}
 
-	fmt.Println("All 100k JWTs generated in users.csv")
+	slog.Info("jwt generation complete", "file", "users.csv", "totalUsers", totalUsers)
 }
 
 func getEnv(key, fallback string) string {

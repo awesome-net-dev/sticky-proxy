@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,14 +14,18 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
 	}
 
 	p, err := proxy.New(cfg)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("failed to initialize proxy", "error", err)
+		os.Exit(1)
 	}
 
 	mux := http.NewServeMux()
@@ -30,15 +34,16 @@ func main() {
 	mux.HandleFunc("/metrics", proxy.Metrics)
 
 	srv := &http.Server{
-		Addr:    ":8080",
+		Addr:    cfg.ProxyPort,
 		Handler: mux,
 	}
 
 	// Start server in a goroutine so it doesn't block signal handling.
 	go func() {
-		log.Printf("proxy listening on %s", cfg.ProxyPort)
-		if err := http.ListenAndServe(cfg.ProxyPort, mux); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("proxy listen error: %v", err)
+		slog.Info("proxy listening", "addr", cfg.ProxyPort)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("proxy listen error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -46,15 +51,16 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-quit
-	log.Printf("received signal %s, shutting down proxy...", sig)
+	slog.Info("received signal, shutting down proxy", "signal", sig.String())
 
 	// Give in-flight requests up to 30 seconds to complete.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("proxy forced shutdown: %v", err)
+		slog.Error("proxy forced shutdown", "error", err)
+		os.Exit(1)
 	}
 
-	log.Println("proxy shutdown complete")
+	slog.Info("proxy shutdown complete")
 }

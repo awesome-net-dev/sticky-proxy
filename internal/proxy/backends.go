@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -9,9 +10,9 @@ import (
 )
 
 type BackendManager struct {
-	failures           sync.Map
-	evictionThreshold  int
-	evictionCooldown   time.Duration
+	failures          sync.Map
+	evictionThreshold int
+	evictionCooldown  time.Duration
 }
 
 func NewBackendManager(r *Redis, evictionThreshold int, evictionCooldown time.Duration) *BackendManager {
@@ -33,6 +34,7 @@ func (b *BackendManager) ProxyRequest(
 	backend string,
 ) {
 	if !b.available(backend) {
+		slog.Warn("backend unavailable, circuit open", "backend", backend)
 		http.Error(w, "backend unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -42,6 +44,7 @@ func (b *BackendManager) ProxyRequest(
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		b.recordFailure(backend)
+		slog.Error("backend proxy error", "backend", backend, "error", err)
 		http.Error(w, "backend error", http.StatusBadGateway)
 	}
 
@@ -55,6 +58,7 @@ func (b *BackendManager) recordFailure(backend string) {
 	f.count++
 	if f.count >= b.evictionThreshold {
 		f.until = time.Now().Add(b.evictionCooldown)
+		slog.Warn("backend circuit breaker opened", "backend", backend, "failureCount", f.count)
 	}
 }
 
@@ -67,6 +71,7 @@ func (b *BackendManager) available(backend string) bool {
 
 	if time.Now().After(f.until) {
 		b.failures.Delete(backend)
+		slog.Info("backend circuit breaker reset", "backend", backend)
 		return true
 	}
 	return false
