@@ -24,7 +24,6 @@ func main() {
 	defer func() { _ = file.Close() }()
 
 	writer := csv.NewWriter(file)
-	defer writer.Flush()
 
 	_ = writer.Write([]string{"userId", "jwt"})
 
@@ -37,6 +36,7 @@ func main() {
 		signed, err := token.SignedString(secret)
 		if err != nil {
 			slog.Error("failed to sign token", "userId", i, "error", err)
+			writer.Flush()
 			os.Exit(1)
 		}
 
@@ -51,6 +51,7 @@ func main() {
 		}
 	}
 
+	writer.Flush()
 	slog.Info("jwt generation complete", "file", "users.csv", "totalUsers", totalUsers)
 }
 

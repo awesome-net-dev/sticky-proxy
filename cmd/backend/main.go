@@ -51,7 +51,7 @@ func main() {
 	// Health check endpoint (liveness probe)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 
 	// HTTP handler
@@ -116,13 +116,13 @@ func main() {
 
 	// Give in-flight requests up to 15 seconds to complete.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("backend forced shutdown", "backend", backendName, "error", err)
 		cancel()
 		os.Exit(1)
 	}
+	cancel()
 
 	slog.Info("backend shutdown complete", "backend", backendName)
 }

@@ -62,13 +62,13 @@ func main() {
 
 	// Give in-flight requests up to 30 seconds to complete.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("proxy forced shutdown", "error", err)
 		cancel()
 		os.Exit(1)
 	}
+	cancel()
 
 	slog.Info("proxy shutdown complete")
 }
