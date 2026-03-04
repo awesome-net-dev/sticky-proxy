@@ -26,9 +26,9 @@ type HealthChecker struct {
 }
 
 type backendHealth struct {
-	consecutiveFails    int
+	consecutiveFails     int
 	consecutiveSuccesses int
-	healthy             bool
+	healthy              bool
 }
 
 // NewHealthChecker creates a HealthChecker with sensible defaults.
