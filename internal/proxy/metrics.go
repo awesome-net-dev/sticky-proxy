@@ -10,6 +10,7 @@ var (
 	totalRequests uint64
 	redisFailures uint64
 	backendErrors uint64
+	rateLimited   uint64
 )
 
 func Metrics(w http.ResponseWriter, _ *http.Request) {
@@ -25,6 +26,10 @@ stickyproxy_redis_failures_total ` + itoa(atomic.LoadUint64(&redisFailures)) + `
 # HELP stickyproxy_backend_errors_total Backend errors
 # TYPE stickyproxy_backend_errors_total counter
 stickyproxy_backend_errors_total ` + itoa(atomic.LoadUint64(&backendErrors)) + `
+
+# HELP stickyproxy_rate_limited_total Requests rejected by rate limiter
+# TYPE stickyproxy_rate_limited_total counter
+stickyproxy_rate_limited_total ` + itoa(atomic.LoadUint64(&rateLimited)) + `
 `))
 }
 
