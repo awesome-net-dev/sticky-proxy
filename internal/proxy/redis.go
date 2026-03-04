@@ -3,8 +3,6 @@ package proxy
 import (
 	"context"
 	_ "embed"
-	"sync/atomic"
-
 	"github.com/redis/go-redis/v9"
 )
 
@@ -45,7 +43,7 @@ func (r *Redis) AssignBackend(
 	).Result()
 
 	if err != nil || res == nil {
-		atomic.AddUint64(&redisFailures, 1)
+		IncRedisFailures()
 		return "", err
 	}
 
