@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,12 +14,25 @@ type BackendManager struct {
 	failures          sync.Map
 	evictionThreshold int
 	evictionCooldown  time.Duration
+	transport         *http.Transport
 }
 
 func NewBackendManager(r *Redis, evictionThreshold int, evictionCooldown time.Duration) *BackendManager {
 	return &BackendManager{
 		evictionThreshold: evictionThreshold,
 		evictionCooldown:  evictionCooldown,
+		transport: &http.Transport{
+			MaxIdleConns:          1000,
+			MaxIdleConnsPerHost:   100,
+			MaxConnsPerHost:       250,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+		},
 	}
 }
 
@@ -41,6 +55,7 @@ func (b *BackendManager) ProxyRequest(
 
 	target, _ := url.Parse(backend)
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = b.transport
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		b.recordFailure(backend)

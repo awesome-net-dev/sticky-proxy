@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -19,11 +20,16 @@ var stickyLua string
 
 func NewRedis(addr string, poolSize int) (*Redis, error) {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		PoolSize: poolSize,
+		Addr:         addr,
+		PoolSize:     poolSize,
+		MinIdleConns: 20,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		PoolTimeout:  4 * time.Second,
 	})
 
-	slog.Info("redis client initialized", "addr", "redis:6379")
+	slog.Info("redis client initialized", "addr", addr)
 
 	return &Redis{
 		client: rdb,

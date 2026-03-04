@@ -5,15 +5,16 @@ import (
 	"log/slog"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"sticky-proxy/internal/config"
 )
 
 type Proxy struct {
-	redis    *Redis
-	cache    *UserCache
-	backends *BackendManager
-	jwtCache *JWTCache
+	redis     *Redis
+	cache     *UserCache
+	backends  *BackendManager
+	jwtCache  *JWTCache
 	jwtSecret []byte
 }
 
@@ -40,6 +41,10 @@ func New(cfg *config.Config) (*Proxy, error) {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	atomic.AddUint64(&totalRequests, 1)
 
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	r = r.WithContext(ctx)
+
 	authHeader := r.Header.Get("Authorization")
 	jwtData, err := extractUserIDFromJWT(authHeader, p.jwtCache, p.jwtSecret)
 	if err != nil {
@@ -52,7 +57,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	backend, err := p.cache.Get(stickyKey)
 	if err != nil {
 		backend, err = p.redis.AssignBackend(
-			context.Background(),
+			ctx,
 			stickyKey,
 			p.backends.Hash(stickyKey),
 		)
