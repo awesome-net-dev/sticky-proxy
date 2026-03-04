@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -19,6 +19,8 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
 	backendName := os.Getenv("BACKEND_NAME")
 	port := os.Getenv("PORT")
 	redisAddr := os.Getenv("REDIS_ADDR")
@@ -32,11 +34,11 @@ func main() {
 	for {
 		err := rdb.SAdd(ctx, "backends:active", fmt.Sprintf("http://%s:%s", backendName, port)).Err()
 		if err != nil {
-			log.Println("Failed to register backend in Redis, retrying...", err)
+			slog.Error("failed to register backend in redis, retrying", "backend", backendName, "error", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		log.Printf("Registered backend '%s' in Redis\n", backendName)
+		slog.Info("registered backend in redis", "backend", backendName)
 		break
 	}
 
@@ -49,7 +51,7 @@ func main() {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Println("WebSocket upgrade failed:", err)
+			slog.Error("websocket upgrade failed", "backend", backendName, "error", err)
 			return
 		}
 		defer conn.Close()
@@ -57,7 +59,7 @@ func main() {
 		for {
 			mt, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Println("WebSocket read error:", err)
+				slog.Error("websocket read error", "backend", backendName, "error", err)
 				break
 			}
 
@@ -66,15 +68,16 @@ func main() {
 			} else {
 				response := fmt.Sprintf("%s echo: %s", backendName, string(message))
 				if err := conn.WriteMessage(mt, []byte(response)); err != nil {
-					log.Println("WebSocket write error:", err)
+					slog.Error("websocket write error", "backend", backendName, "error", err)
 					break
 				}
 			}
 		}
 	})
 
-	log.Printf("Starting backend %s on port %s\n", backendName, port)
+	slog.Info("starting backend", "backend", backendName, "port", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatal(err)
+		slog.Error("http server failed", "backend", backendName, "port", port, "error", err)
+		os.Exit(1)
 	}
 }

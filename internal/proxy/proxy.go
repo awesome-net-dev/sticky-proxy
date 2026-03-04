@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 )
@@ -22,6 +23,8 @@ func New() (*Proxy, error) {
 	b := NewBackendManager(r)
 	b.Start()
 
+	slog.Info("proxy initialized")
+
 	return &Proxy{
 		redis:    r,
 		cache:    NewUserCache(),
@@ -36,6 +39,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	jwtData, err := extractUserIDFromJWT(authHeader, p.jwtCache)
 	if err != nil {
+		slog.Warn("unauthorized request", "error", err, "path", r.URL.Path)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -50,10 +54,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			atomic.AddUint64(&backendErrors, 1)
+			slog.Error("failed to assign backend", "userId", stickyKey, "error", err)
 			http.Error(w, "no backend", http.StatusServiceUnavailable)
 			return
 		}
 		p.cache.Set(stickyKey, backend)
+		slog.Debug("assigned backend via redis", "userId", stickyKey, "backend", backend)
+	} else {
+		slog.Debug("cache hit", "userId", stickyKey, "backend", backend)
 	}
 
 	p.backends.ProxyRequest(w, r, backend)

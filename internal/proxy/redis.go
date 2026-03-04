@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	_ "embed"
+	"log/slog"
 	"sync/atomic"
 
 	"github.com/redis/go-redis/v9"
@@ -20,6 +21,8 @@ func NewRedis() (*Redis, error) {
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "redis:6379",
 	})
+
+	slog.Info("redis client initialized", "addr", "redis:6379")
 
 	return &Redis{
 		client: rdb,
@@ -46,6 +49,7 @@ func (r *Redis) AssignBackend(
 
 	if err != nil || res == nil {
 		atomic.AddUint64(&redisFailures, 1)
+		slog.Error("redis assign backend failed", "userId", userID, "error", err)
 		return "", err
 	}
 
