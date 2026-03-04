@@ -75,10 +75,17 @@ func (b *BackendManager) recordFailure(backend string) {
 	v, _ := b.failures.LoadOrStore(backend, &failure{})
 	f := v.(*failure)
 
+	f.mu.Lock()
 	f.count++
-	if f.count >= b.evictionThreshold {
+	shouldEvict := f.count >= b.evictionThreshold
+	if shouldEvict {
 		f.until = time.Now().Add(b.evictionCooldown)
-		slog.Warn("backend circuit breaker opened", "backend", backend, "failureCount", f.count)
+	}
+	count := f.count
+	f.mu.Unlock()
+
+	if shouldEvict {
+		slog.Warn("backend circuit breaker opened", "backend", backend, "failureCount", count)
 		b.invalidateStickyMappings(backend)
 	}
 }
@@ -86,10 +93,14 @@ func (b *BackendManager) recordFailure(backend string) {
 // invalidateStickyMappings clears all sticky session mappings for a backend
 // that has been evicted, so users are re-assigned on the next request.
 func (b *BackendManager) invalidateStickyMappings(backend string) {
-	b.cache.InvalidateBackend(backend)
+	if b.cache != nil {
+		b.cache.InvalidateBackend(backend)
+	}
 
-	if err := b.redis.InvalidateBackend(context.Background(), backend); err != nil {
-		slog.Error("failed to invalidate redis mappings", "backend", backend, "error", err)
+	if b.redis != nil {
+		if err := b.redis.InvalidateBackend(context.Background(), backend); err != nil {
+			slog.Error("failed to invalidate redis mappings", "backend", backend, "error", err)
+		}
 	}
 }
 
@@ -101,7 +112,11 @@ func (b *BackendManager) Available(backend string) bool {
 	}
 	f := v.(*failure)
 
-	if time.Now().After(f.until) {
+	f.mu.Lock()
+	until := f.until
+	f.mu.Unlock()
+
+	if time.Now().After(until) {
 		b.failures.Delete(backend)
 		slog.Info("backend circuit breaker reset", "backend", backend)
 		return true
@@ -110,6 +125,7 @@ func (b *BackendManager) Available(backend string) bool {
 }
 
 type failure struct {
+	mu    sync.Mutex
 	count int
 	until time.Time
 }
