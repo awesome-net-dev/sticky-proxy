@@ -13,29 +13,247 @@ A high-performance sticky-session HTTP/WebSocket reverse proxy written in Go. Ro
 - **Prometheus metrics** — request counters, latency histograms, cache hit rates, and more on `/metrics`
 - **Graceful shutdown** — drains in-flight requests on SIGTERM/SIGINT (30s timeout)
 
+## Use Cases
+
+```mermaid
+graph LR
+    Client((Client))
+    Ops((Ops / Admin))
+
+    Client -->|HTTP request with JWT| SendRequest[Send Request]
+    Client -->|WebSocket upgrade| OpenWS[Open WebSocket]
+    Client -->|Excessive requests| HitRateLimit[Hit Rate Limit → 429]
+
+    Ops -->|GET /healthz| CheckHealth[Check Health]
+    Ops -->|GET /metrics| ScrapeMetrics[Scrape Prometheus Metrics]
+    Ops -->|docker compose up| Deploy[Deploy Stack]
+
+    SendRequest --> StickyRoute[Sticky-Routed to Backend]
+    OpenWS --> StickyRoute
+```
+
 ## Architecture
 
-```
-                    ┌──────────┐
- Client ──JWT──────>│  Proxy   │
-                    │          │
-                    │ 1. Local ├──hit──> Backend A
-                    │   Cache  │
-                    │          │
-                    │ 2. Redis ├──hit──> Backend B
-                    │   (Lua)  │
-                    │          │
-                    │ 3. Hash  ├──new──> Backend C
-                    │ Fallback │
-                    └──────────┘
+### Component Overview
+
+```mermaid
+graph TB
+    subgraph Clients
+        C1[Client 1]
+        C2[Client 2]
+        C3[Client N]
+    end
+
+    subgraph Proxy["Proxy :8080"]
+        JWT[JWT Auth + Cache]
+        RL[Rate Limiter]
+        LC[Local Cache]
+        RD[Redis Client + CB]
+        HF[CRC32 Hash Fallback]
+        BM[Backend Manager + CB]
+        WS[WebSocket Relay]
+        HC[Health Checker]
+        MET[Metrics Collector]
+    end
+
+    subgraph Storage
+        Redis[(DragonflyDB / Redis)]
+    end
+
+    subgraph Backends
+        B1[Backend 1]
+        B2[Backend 2]
+        B3[Backend 3]
+    end
+
+    C1 & C2 & C3 --> JWT
+    JWT --> RL
+    RL --> LC
+    LC -->|miss| RD
+    RD -->|circuit open| HF
+    RD <--> Redis
+    LC & RD & HF --> BM
+    BM --> B1 & B2 & B3
+    BM -->|WebSocket| WS
+    WS --> B1 & B2 & B3
+    HC -->|probe /healthz| B1 & B2 & B3
+    HC <-->|update backends:active| Redis
 ```
 
-**Request flow:**
-1. Extract `userId` from JWT in the `Authorization: Bearer <token>` header
-2. Check local in-memory cache (fast path)
-3. On miss, execute atomic Redis Lua script for sticky assignment
-4. If Redis is down (circuit breaker open), fall back to CRC32 hash-based routing
-5. Forward request to the assigned backend
+### HTTP Request Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as Proxy
+    participant JWT as JWT Auth
+    participant RL as Rate Limiter
+    participant LC as Local Cache
+    participant R as Redis (Lua)
+    participant HF as Hash Fallback
+    participant B as Backend
+
+    C->>P: HTTP request (Authorization: Bearer <token>)
+    P->>JWT: Extract userId from token
+    alt Invalid / missing JWT
+        JWT-->>P: error
+        P-->>C: 401 Unauthorized
+    end
+    JWT-->>P: userId
+
+    P->>RL: Allow(userId)?
+    alt Rate limit exceeded
+        RL-->>P: denied
+        P-->>C: 429 Too Many Requests
+    end
+    RL-->>P: allowed
+
+    P->>LC: Get(userId)
+    alt Local cache hit & backend available
+        LC-->>P: backend URL
+    else Cache miss or backend unavailable
+        LC-->>P: miss
+        P->>R: Lua script (sticky:userId, backends:active)
+        alt Redis circuit breaker OPEN
+            R-->>P: circuit open
+            P->>HF: CRC32 hash over cached backends
+            HF-->>P: backend URL
+        else Redis OK
+            R-->>P: backend URL
+            P->>LC: Set(userId, backend)
+        else Redis fails & no cached backends
+            R-->>P: error
+            P-->>C: 503 Service Unavailable
+        end
+    end
+
+    P->>B: Forward request (reverse proxy)
+    B-->>P: Response
+    P-->>C: Response
+```
+
+### WebSocket Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as Proxy
+    participant B as Backend
+
+    C->>P: HTTP Upgrade: websocket + JWT
+    Note over P: Auth + sticky lookup<br/>(same as HTTP flow)
+    P->>B: Dial ws:// backend
+    B-->>P: 101 Switching Protocols
+    P-->>C: 101 Switching Protocols
+
+    par Bidirectional relay
+        loop Client → Backend
+            C->>P: WS message
+            P->>B: WS message
+        end
+    and
+        loop Backend → Client
+            B->>P: WS message
+            P->>C: WS message
+        end
+    end
+
+    alt Either side closes
+        C->>P: Close frame
+        P->>B: Close frame
+    end
+```
+
+### Redis Circuit Breaker States
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+
+    Closed --> Closed: Success → reset failures
+    Closed --> Open: failures ≥ threshold (default 5)
+
+    Open --> Open: cooldown not elapsed → hash fallback
+    Open --> HalfOpen: cooldown elapsed (default 30s)
+
+    HalfOpen --> Closed: Probe succeeds → reset
+    HalfOpen --> Open: Probe fails → reopen
+```
+
+### Backend Circuit Breaker States
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+
+    Healthy --> Healthy: Proxy success
+    Healthy --> Evicted: failures ≥ threshold (default 3)
+
+    Evicted --> Evicted: cooldown not elapsed → 503
+    note right of Evicted: Sticky mappings invalidated<br/>in local cache + Redis
+    Evicted --> Healthy: cooldown elapsed (default 1m) → auto-reset
+
+```
+
+### Health Checker Behavior
+
+```mermaid
+sequenceDiagram
+    participant HC as Health Checker
+    participant R as Redis
+    participant B1 as Backend 1
+    participant B2 as Backend 2
+
+    loop Every 10s
+        HC->>R: SMEMBERS backends:active
+        R-->>HC: [backend1, backend2, ...]
+        HC->>R: Refresh cached backend list (for hash fallback)
+
+        par Bounded concurrency (max 10)
+            HC->>B1: GET /healthz
+            B1-->>HC: 200 OK
+        and
+            HC->>B2: GET /healthz
+            B2-->>HC: timeout / error
+        end
+
+        alt 3 consecutive failures
+            HC->>R: SREM backends:active backend2
+            Note over HC: Mark backend2 unhealthy
+        end
+
+        alt Was unhealthy, 1 success
+            HC->>R: SADD backends:active backend2
+            Note over HC: Mark backend2 healthy
+        end
+    end
+```
+
+### Deployment Topology
+
+```mermaid
+graph TB
+    subgraph Docker Compose
+        subgraph proxy_svc["proxy (512MB, 1 CPU)"]
+            SP[sticky-proxy :8080]
+        end
+
+        subgraph redis_svc["redis (1GB, 2 CPU)"]
+            DF[DragonflyDB :6379]
+        end
+
+        subgraph backends["backends (256MB, 0.5 CPU each)"]
+            B1[backend1 :5678]
+            B2[backend2 :5678]
+            B3[backend3 :5678]
+        end
+    end
+
+    Internet((Internet)) -->|:8080| SP
+    SP <--> DF
+    SP --> B1 & B2 & B3
+    B1 & B2 & B3 -->|self-register on startup| DF
+```
 
 ## Quick Start
 
