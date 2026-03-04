@@ -35,7 +35,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/", p)
 	mux.HandleFunc("/healthz", p.Healthz)
-	mux.HandleFunc("/metrics", proxy.Metrics)
+	mux.HandleFunc("/metrics", proxy.MetricsHandler)
 
 	srv := &http.Server{
 		Addr:    cfg.ProxyPort,

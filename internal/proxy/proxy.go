@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"sync/atomic"
+	"strings"
 	"time"
 
 	"sticky-proxy/internal/config"
@@ -42,7 +42,19 @@ func New(cfg *config.Config) (*Proxy, error) {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	atomic.AddUint64(&totalRequests, 1)
+	start := time.Now()
+	IncRequests()
+	IncActiveConnections()
+	defer func() {
+		DecActiveConnections()
+		RecordRequestDuration(time.Since(start).Seconds())
+	}()
+
+	// Track WebSocket upgrade requests.
+	isWS := isWebSocket(r)
+	if isWS {
+		IncWebSocketConnections()
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
@@ -51,6 +63,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	jwtData, err := extractUserIDFromJWT(authHeader, p.jwtCache, p.jwtSecret)
 	if err != nil {
+		IncAuthFailures()
 		slog.Warn("unauthorized request", "error", err, "path", r.URL.Path)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -67,29 +80,41 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		// Local cache miss — try Redis.
 		backend, err = p.redis.AssignBackend(
 			ctx,
 			stickyKey,
 			p.backends.Hash(stickyKey),
 		)
 		if err != nil {
-			atomic.AddUint64(&backendErrors, 1)
+			IncCacheMisses()
+			IncBackendErrors()
 			slog.Error("failed to assign backend", "userId", stickyKey, "error", err)
 			http.Error(w, "no backend", http.StatusServiceUnavailable)
 			return
 		}
+		// Redis had (or created) the mapping.
+		IncCacheHitsRedis()
 		p.cache.Set(stickyKey, backend)
 		slog.Debug("assigned backend via redis", "userId", stickyKey, "backend", backend)
 	} else {
+		// Local cache hit.
+		IncCacheHitsLocal()
 		slog.Debug("cache hit", "userId", stickyKey, "backend", backend)
 	}
 
 	// WebSocket upgrade requests are handled separately because
 	// httputil.ReverseProxy does not support the Upgrade handshake.
-	if isWebSocketUpgrade(r) {
+	if isWS {
 		proxyWebSocket(w, r, backend)
 		return
 	}
 
+	IncBackendRequests(backend)
 	p.backends.ProxyRequest(w, r, backend)
+}
+
+// isWebSocket returns true if the request is a WebSocket upgrade.
+func isWebSocket(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 }

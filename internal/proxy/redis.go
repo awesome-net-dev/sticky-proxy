@@ -4,7 +4,6 @@ import (
 	"context"
 	_ "embed"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -55,7 +54,7 @@ func (r *Redis) AssignBackend(
 	).Result()
 
 	if err != nil || res == nil {
-		atomic.AddUint64(&redisFailures, 1)
+		IncRedisFailures()
 		slog.Error("redis assign backend failed", "userId", userID, "error", err)
 		return "", err
 	}
