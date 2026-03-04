@@ -1,27 +1,19 @@
 package proxy
 
 import (
-	"os"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const testSecret = "test-secret-key-for-unit-tests"
-
-func TestMain(m *testing.M) {
-	// Set the JWT secret used by extractUserIDFromJWT
-	os.Setenv("JWT_SECRET", testSecret)
-	jwtSecret = []byte(testSecret)
-	os.Exit(m.Run())
-}
+var testSecretBytes = []byte("test-secret-key-for-unit-tests")
 
 // makeToken creates a signed JWT with the given claims using HMAC-SHA256.
 func makeToken(t *testing.T, claims jwt.MapClaims) string {
 	t.Helper()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	s, err := token.SignedString([]byte(testSecret))
+	s, err := token.SignedString(testSecretBytes)
 	if err != nil {
 		t.Fatalf("failed to sign token: %v", err)
 	}
@@ -37,7 +29,7 @@ func TestExtractUserIDFromJWT_ValidToken(t *testing.T) {
 		"exp":    float64(time.Now().Add(time.Hour).Unix()),
 	})
 
-	result, err := extractUserIDFromJWT("Bearer "+tokenStr, cache)
+	result, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -55,7 +47,7 @@ func TestExtractUserIDFromJWT_ExpiredToken(t *testing.T) {
 		"exp":    float64(time.Now().Add(-time.Hour).Unix()),
 	})
 
-	_, err := extractUserIDFromJWT("Bearer "+tokenStr, cache)
+	_, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
 	if err == nil {
 		t.Fatal("expected error for expired token, got nil")
 	}
@@ -73,12 +65,12 @@ func TestExtractUserIDFromJWT_WrongSigningMethod(t *testing.T) {
 	})
 	// Tamper the header to claim RSA
 	token.Header["alg"] = "RS256"
-	tokenStr, err := token.SignedString([]byte(testSecret))
+	tokenStr, err := token.SignedString(testSecretBytes)
 	if err != nil {
 		t.Fatalf("failed to sign token: %v", err)
 	}
 
-	_, err = extractUserIDFromJWT("Bearer "+tokenStr, cache)
+	_, err = extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
 	if err == nil {
 		t.Fatal("expected error for wrong signing method, got nil")
 	}
@@ -93,7 +85,7 @@ func TestExtractUserIDFromJWT_MissingUserIDClaim(t *testing.T) {
 		"exp": float64(time.Now().Add(time.Hour).Unix()),
 	})
 
-	result, err := extractUserIDFromJWT("Bearer "+tokenStr, cache)
+	result, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
 	if err != nil {
 		t.Fatalf("expected no error (token itself is valid), got %v", err)
 	}
@@ -107,7 +99,7 @@ func TestExtractUserIDFromJWT_MalformedToken(t *testing.T) {
 	t.Parallel()
 	cache := NewJWTCache()
 
-	_, err := extractUserIDFromJWT("Bearer not.a.valid.jwt.token", cache)
+	_, err := extractUserIDFromJWT("Bearer not.a.valid.jwt.token", cache, testSecretBytes)
 	if err == nil {
 		t.Fatal("expected error for malformed token, got nil")
 	}
@@ -117,7 +109,7 @@ func TestExtractUserIDFromJWT_EmptyToken(t *testing.T) {
 	t.Parallel()
 	cache := NewJWTCache()
 
-	_, err := extractUserIDFromJWT("", cache)
+	_, err := extractUserIDFromJWT("", cache, testSecretBytes)
 	if err == nil {
 		t.Fatal("expected error for empty auth header, got nil")
 	}
@@ -140,7 +132,7 @@ func TestExtractUserIDFromJWT_InvalidAuthHeaderFormat(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := extractUserIDFromJWT(tc.header, cache)
+			_, err := extractUserIDFromJWT(tc.header, cache, testSecretBytes)
 			if err == nil {
 				t.Errorf("expected error for header %q, got nil", tc.header)
 			}
@@ -158,13 +150,13 @@ func TestExtractUserIDFromJWT_CachesValidToken(t *testing.T) {
 	})
 
 	// First call parses the token
-	result1, err := extractUserIDFromJWT("Bearer "+tokenStr, cache)
+	result1, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 
 	// Second call should hit the cache
-	result2, err := extractUserIDFromJWT("Bearer "+tokenStr, cache)
+	result2, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}

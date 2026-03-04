@@ -9,16 +9,16 @@ import (
 
 func TestBackendManager_AvailableByDefault(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 
-	if !bm.available("http://backend:8080") {
+	if !bm.Available("http://backend:8080") {
 		t.Fatal("new backend should be available by default")
 	}
 }
 
 func TestBackendManager_UnavailableAfterFailures(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 
 	backend := "http://failing-backend:8080"
 
@@ -27,14 +27,14 @@ func TestBackendManager_UnavailableAfterFailures(t *testing.T) {
 	bm.recordFailure(backend)
 	bm.recordFailure(backend)
 
-	if bm.available(backend) {
+	if bm.Available(backend) {
 		t.Fatal("backend should be unavailable after 3 failures")
 	}
 }
 
 func TestBackendManager_StillAvailableBeforeThreshold(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 
 	backend := "http://partial-fail:8080"
 
@@ -45,14 +45,14 @@ func TestBackendManager_StillAvailableBeforeThreshold(t *testing.T) {
 	// The failure struct has count=2, but until is zero-value (before Now()),
 	// so available() will delete the entry and return true.
 	// This is the actual behavior of the code.
-	if !bm.available(backend) {
+	if !bm.Available(backend) {
 		t.Fatal("backend should still be available before reaching threshold")
 	}
 }
 
 func TestBackendManager_RecoveryAfterCooldown(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 
 	backend := "http://recover-backend:8080"
 
@@ -61,7 +61,7 @@ func TestBackendManager_RecoveryAfterCooldown(t *testing.T) {
 	bm.recordFailure(backend)
 	bm.recordFailure(backend)
 
-	if bm.available(backend) {
+	if bm.Available(backend) {
 		t.Fatal("backend should be unavailable immediately after failures")
 	}
 
@@ -71,9 +71,11 @@ func TestBackendManager_RecoveryAfterCooldown(t *testing.T) {
 		t.Fatal("failure entry should exist")
 	}
 	f := v.(*failure)
+	f.mu.Lock()
 	f.until = time.Now().Add(-time.Second)
+	f.mu.Unlock()
 
-	if !bm.available(backend) {
+	if !bm.Available(backend) {
 		t.Fatal("backend should be available after cooldown expires")
 	}
 }
@@ -84,11 +86,11 @@ func TestBackendManager_ProxyRequest_Success(t *testing.T) {
 	// Create a test backend server
 	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("hello from backend"))
+		_, _ = w.Write([]byte("hello from backend"))
 	}))
 	defer backendServer.Close()
 
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/test", nil)
 
@@ -104,7 +106,7 @@ func TestBackendManager_ProxyRequest_Success(t *testing.T) {
 
 func TestBackendManager_ProxyRequest_UnavailableBackend(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 
 	backend := "http://unavailable-backend:8080"
 
@@ -137,11 +139,11 @@ func TestBackendManager_ProxyRequest_BackendError(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hijack failed: %v", err)
 		}
-		conn.Close()
+		_ = conn.Close()
 	}))
 	defer backendServer.Close()
 
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/test", nil)
 
@@ -155,7 +157,7 @@ func TestBackendManager_ProxyRequest_BackendError(t *testing.T) {
 
 func TestBackendManager_Hash(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 
 	h1 := bm.Hash("user-1")
 	h2 := bm.Hash("user-1")
@@ -171,7 +173,7 @@ func TestBackendManager_Hash(t *testing.T) {
 
 func TestBackendManager_MultipleBackendFailures(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil)
+	bm := NewBackendManager(nil, nil, 3, time.Minute)
 
 	backend1 := "http://backend-1:8080"
 	backend2 := "http://backend-2:8080"
@@ -181,10 +183,10 @@ func TestBackendManager_MultipleBackendFailures(t *testing.T) {
 	bm.recordFailure(backend1)
 	bm.recordFailure(backend1)
 
-	if bm.available(backend1) {
+	if bm.Available(backend1) {
 		t.Fatal("backend1 should be unavailable")
 	}
-	if !bm.available(backend2) {
+	if !bm.Available(backend2) {
 		t.Fatal("backend2 should still be available")
 	}
 }

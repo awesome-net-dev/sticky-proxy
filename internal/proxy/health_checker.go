@@ -26,9 +26,9 @@ type HealthChecker struct {
 }
 
 type backendHealth struct {
-	consecutiveFails    int
+	consecutiveFails     int
 	consecutiveSuccesses int
-	healthy             bool
+	healthy              bool
 }
 
 // NewHealthChecker creates a HealthChecker with sensible defaults.
@@ -136,7 +136,7 @@ func (hc *HealthChecker) probe(ctx context.Context, client *http.Client, backend
 		hc.recordResult(ctx, backend, false)
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	hc.recordResult(ctx, backend, resp.StatusCode == http.StatusOK)
 }

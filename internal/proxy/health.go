@@ -17,7 +17,7 @@ func (p *Proxy) Healthz(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":           "ok",
 		"healthy_backends": healthy,
 	})

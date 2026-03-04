@@ -9,7 +9,7 @@ import (
 
 func TestUserCache_SetAndGet(t *testing.T) {
 	t.Parallel()
-	cache := NewUserCache()
+	cache := NewUserCache(24 * time.Hour)
 
 	cache.Set("user-1", "http://backend-1:8080")
 
@@ -24,7 +24,7 @@ func TestUserCache_SetAndGet(t *testing.T) {
 
 func TestUserCache_MissForUnknownUser(t *testing.T) {
 	t.Parallel()
-	cache := NewUserCache()
+	cache := NewUserCache(24 * time.Hour)
 
 	_, err := cache.Get("nonexistent-user")
 	if !errors.Is(err, ErrCacheMiss) {
@@ -34,7 +34,7 @@ func TestUserCache_MissForUnknownUser(t *testing.T) {
 
 func TestUserCache_ExpiredEntry(t *testing.T) {
 	t.Parallel()
-	cache := NewUserCache()
+	cache := NewUserCache(24 * time.Hour)
 	// Override the TTL to a very short duration for testing
 	cache.ttl = time.Millisecond
 
@@ -51,7 +51,7 @@ func TestUserCache_ExpiredEntry(t *testing.T) {
 
 func TestUserCache_MultipleUsers(t *testing.T) {
 	t.Parallel()
-	cache := NewUserCache()
+	cache := NewUserCache(24 * time.Hour)
 
 	users := map[string]string{
 		"user-a": "http://backend-a:8080",
@@ -77,7 +77,7 @@ func TestUserCache_MultipleUsers(t *testing.T) {
 
 func TestUserCache_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
-	cache := NewUserCache()
+	cache := NewUserCache(24 * time.Hour)
 
 	const goroutines = 100
 	var wg sync.WaitGroup
@@ -91,7 +91,7 @@ func TestUserCache_ConcurrentAccess(t *testing.T) {
 
 		go func(id int) {
 			defer wg.Done()
-			cache.Get("concurrent-user")
+			_, _ = cache.Get("concurrent-user")
 		}(i)
 	}
 
@@ -101,7 +101,7 @@ func TestUserCache_ConcurrentAccess(t *testing.T) {
 
 func TestUserCache_OverwriteExistingEntry(t *testing.T) {
 	t.Parallel()
-	cache := NewUserCache()
+	cache := NewUserCache(24 * time.Hour)
 
 	cache.Set("user-overwrite", "http://old-backend:8080")
 	cache.Set("user-overwrite", "http://new-backend:8080")
@@ -117,7 +117,7 @@ func TestUserCache_OverwriteExistingEntry(t *testing.T) {
 
 func TestUserCache_ExpiredEntryIsDeleted(t *testing.T) {
 	t.Parallel()
-	cache := NewUserCache()
+	cache := NewUserCache(24 * time.Hour)
 	cache.ttl = time.Millisecond
 
 	cache.Set("user-expire-del", "http://backend:8080")
