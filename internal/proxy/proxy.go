@@ -68,5 +68,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("cache hit", "userId", stickyKey, "backend", backend)
 	}
 
+	// WebSocket upgrade requests are handled separately because
+	// httputil.ReverseProxy does not support the Upgrade handshake.
+	if isWebSocketUpgrade(r) {
+		proxyWebSocket(w, r, backend)
+		return
+	}
+
 	p.backends.ProxyRequest(w, r, backend)
 }
