@@ -40,6 +40,12 @@ func main() {
 		break
 	}
 
+	// Health check endpoint (liveness probe)
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
 	// HTTP handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Hello from %s\n", backendName)

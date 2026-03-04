@@ -7,10 +7,11 @@ import (
 )
 
 type Proxy struct {
-	redis    *Redis
-	cache    *UserCache
-	backends *BackendManager
-	jwtCache *JWTCache
+	redis         *Redis
+	cache         *UserCache
+	backends      *BackendManager
+	jwtCache      *JWTCache
+	HealthChecker *HealthChecker
 }
 
 func New() (*Proxy, error) {
@@ -23,10 +24,11 @@ func New() (*Proxy, error) {
 	b.Start()
 
 	return &Proxy{
-		redis:    r,
-		cache:    NewUserCache(),
-		backends: b,
-		jwtCache: NewJWTCache(),
+		redis:         r,
+		cache:         NewUserCache(),
+		backends:      b,
+		jwtCache:      NewJWTCache(),
+		HealthChecker: NewHealthChecker(r),
 	}, nil
 }
 
