@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -28,9 +30,11 @@ func main() {
 		Addr: redisAddr,
 	})
 
+	backendAddr := fmt.Sprintf("http://%s:%s", backendName, port)
+
 	// Register backend in Redis
 	for {
-		err := rdb.SAdd(ctx, "backends:active", fmt.Sprintf("http://%s:%s", backendName, port)).Err()
+		err := rdb.SAdd(ctx, "backends:active", backendAddr).Err()
 		if err != nil {
 			log.Println("Failed to register backend in Redis, retrying...", err)
 			time.Sleep(2 * time.Second)
@@ -40,13 +44,15 @@ func main() {
 		break
 	}
 
+	mux := http.NewServeMux()
+
 	// HTTP handler
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Hello from %s\n", backendName)
 	})
 
 	// WebSocket handler
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Println("WebSocket upgrade failed:", err)
@@ -73,8 +79,39 @@ func main() {
 		}
 	})
 
-	log.Printf("Starting backend %s on port %s\n", backendName, port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: mux,
 	}
+
+	// Start server in a goroutine so it doesn't block signal handling.
+	go func() {
+		log.Printf("Starting backend %s on port %s\n", backendName, port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("backend listen error: %v", err)
+		}
+	}()
+
+	// Wait for SIGTERM or SIGINT.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	sig := <-quit
+	log.Printf("received signal %s, shutting down backend %s...", sig, backendName)
+
+	// Deregister from Redis so the proxy stops sending new requests.
+	if err := rdb.SRem(ctx, "backends:active", backendAddr).Err(); err != nil {
+		log.Printf("failed to deregister backend from Redis: %v", err)
+	} else {
+		log.Printf("deregistered backend '%s' from Redis", backendName)
+	}
+
+	// Give in-flight requests up to 15 seconds to complete.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("backend forced shutdown: %v", err)
+	}
+
+	log.Printf("backend %s shutdown complete", backendName)
 }
