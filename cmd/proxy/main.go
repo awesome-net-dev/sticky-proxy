@@ -57,8 +57,9 @@ func main() {
 	sig := <-quit
 	slog.Info("received signal, shutting down proxy", "signal", sig.String())
 
-	// Stop the health checker.
+	// Stop the health checker and proxy background goroutines.
 	healthCancel()
+	p.Stop()
 
 	// Give in-flight requests up to 30 seconds to complete.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

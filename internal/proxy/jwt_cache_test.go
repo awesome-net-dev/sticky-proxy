@@ -8,7 +8,8 @@ import (
 
 func TestJWTCache_StoreAndRetrieve(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	cached := &CachedJWT{
 		UserID: "user-1",
@@ -27,7 +28,8 @@ func TestJWTCache_StoreAndRetrieve(t *testing.T) {
 
 func TestJWTCache_ExpiredTokenNotReturned(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	cached := &CachedJWT{
 		UserID: "user-expired",
@@ -43,7 +45,8 @@ func TestJWTCache_ExpiredTokenNotReturned(t *testing.T) {
 
 func TestJWTCache_MissForUnknownToken(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	_, ok := cache.Get("nonexistent-token")
 	if ok {
@@ -53,7 +56,8 @@ func TestJWTCache_MissForUnknownToken(t *testing.T) {
 
 func TestJWTCache_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	const goroutines = 100
 	var wg sync.WaitGroup
@@ -82,7 +86,8 @@ func TestJWTCache_ConcurrentAccess(t *testing.T) {
 
 func TestJWTCache_ExpiredEntryIsDeleted(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	cached := &CachedJWT{
 		UserID: "user-del",
@@ -106,7 +111,8 @@ func TestJWTCache_ExpiredEntryIsDeleted(t *testing.T) {
 
 func TestJWTCache_MultipleTokens(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	tokens := map[string]*CachedJWT{
 		"token-a": {UserID: "user-a", Exp: time.Now().Add(time.Hour)},
@@ -127,5 +133,70 @@ func TestJWTCache_MultipleTokens(t *testing.T) {
 		if got.UserID != want.UserID {
 			t.Errorf("token %s: expected UserID %q, got %q", k, want.UserID, got.UserID)
 		}
+	}
+}
+
+func TestJWTCache_CleanupRemovesExpired(t *testing.T) {
+	t.Parallel()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
+
+	cache.Set("expired-1", &CachedJWT{UserID: "u1", Exp: time.Now().Add(-time.Second)})
+	cache.Set("expired-2", &CachedJWT{UserID: "u2", Exp: time.Now().Add(-time.Second)})
+	cache.Set("valid-1", &CachedJWT{UserID: "u3", Exp: time.Now().Add(time.Hour)})
+
+	cache.sweep()
+
+	if _, ok := cache.Get("valid-1"); !ok {
+		t.Error("valid entry should survive sweep")
+	}
+
+	// Expired entries were already removed by sweep; verify they're gone
+	// by checking the internal map directly (Get would also delete them).
+	if _, loaded := cache.data.Load("expired-1"); loaded {
+		t.Error("expired-1 should have been swept")
+	}
+	if _, loaded := cache.data.Load("expired-2"); loaded {
+		t.Error("expired-2 should have been swept")
+	}
+}
+
+func TestJWTCache_MaxSizeEviction(t *testing.T) {
+	t.Parallel()
+	cache := NewJWTCache(5)
+	t.Cleanup(cache.Stop)
+
+	// Insert 10 valid entries.
+	for i := 0; i < 10; i++ {
+		cache.Set("tok-"+string(rune('A'+i)), &CachedJWT{
+			UserID: "user",
+			Exp:    time.Now().Add(time.Hour),
+		})
+	}
+
+	cache.sweep()
+
+	// Count remaining entries.
+	remaining := 0
+	cache.data.Range(func(_, _ any) bool {
+		remaining++
+		return true
+	})
+
+	if remaining > 5 {
+		t.Errorf("expected at most 5 entries after sweep, got %d", remaining)
+	}
+}
+
+func TestJWTCache_Stop(t *testing.T) {
+	t.Parallel()
+	cache := NewJWTCache(0)
+	cache.Stop()
+
+	// After Stop, the goroutine should have exited.
+	// Calling Set/Get should still work (no panic).
+	cache.Set("after-stop", &CachedJWT{UserID: "u", Exp: time.Now().Add(time.Hour)})
+	if _, ok := cache.Get("after-stop"); !ok {
+		t.Error("expected cache hit after stop")
 	}
 }

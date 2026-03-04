@@ -14,14 +14,18 @@ type cacheEntry struct {
 }
 
 type UserCache struct {
-	ttl  time.Duration
-	data sync.Map // map[string]*cacheEntry
+	ttl    time.Duration
+	data   sync.Map // map[string]*cacheEntry
+	stopCh chan struct{}
 }
 
 func NewUserCache(ttl time.Duration) *UserCache {
-	return &UserCache{
-		ttl: ttl,
+	c := &UserCache{
+		ttl:    ttl,
+		stopCh: make(chan struct{}),
 	}
+	go c.cleanupLoop()
+	return c
 }
 
 func (c *UserCache) Get(key string) (string, error) {
@@ -62,4 +66,30 @@ func (c *UserCache) InvalidateBackend(backend string) {
 		}
 		return true
 	})
+}
+
+func (c *UserCache) cleanupLoop() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			c.data.Range(func(key, value any) bool {
+				entry := value.(*cacheEntry)
+				if now.After(entry.exp) {
+					c.data.Delete(key)
+				}
+				return true
+			})
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
+// Stop terminates the background cleanup goroutine.
+func (c *UserCache) Stop() {
+	close(c.stopCh)
 }

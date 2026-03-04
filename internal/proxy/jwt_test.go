@@ -22,7 +22,8 @@ func makeToken(t *testing.T, claims jwt.MapClaims) string {
 
 func TestExtractUserIDFromJWT_ValidToken(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	tokenStr := makeToken(t, jwt.MapClaims{
 		"userId": "user-123",
@@ -40,7 +41,8 @@ func TestExtractUserIDFromJWT_ValidToken(t *testing.T) {
 
 func TestExtractUserIDFromJWT_ExpiredToken(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	tokenStr := makeToken(t, jwt.MapClaims{
 		"userId": "user-expired",
@@ -55,7 +57,8 @@ func TestExtractUserIDFromJWT_ExpiredToken(t *testing.T) {
 
 func TestExtractUserIDFromJWT_WrongSigningMethod(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	// Create a token that claims to use RSA but is actually HMAC.
 	// jwt.Parse should reject this because of the signing method check.
@@ -78,7 +81,8 @@ func TestExtractUserIDFromJWT_WrongSigningMethod(t *testing.T) {
 
 func TestExtractUserIDFromJWT_MissingUserIDClaim(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	tokenStr := makeToken(t, jwt.MapClaims{
 		"sub": "some-subject",
@@ -97,7 +101,8 @@ func TestExtractUserIDFromJWT_MissingUserIDClaim(t *testing.T) {
 
 func TestExtractUserIDFromJWT_MalformedToken(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	_, err := extractUserIDFromJWT("Bearer not.a.valid.jwt.token", cache, testSecretBytes)
 	if err == nil {
@@ -107,7 +112,8 @@ func TestExtractUserIDFromJWT_MalformedToken(t *testing.T) {
 
 func TestExtractUserIDFromJWT_EmptyToken(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	_, err := extractUserIDFromJWT("", cache, testSecretBytes)
 	if err == nil {
@@ -117,7 +123,8 @@ func TestExtractUserIDFromJWT_EmptyToken(t *testing.T) {
 
 func TestExtractUserIDFromJWT_InvalidAuthHeaderFormat(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	tests := []struct {
 		name   string
@@ -142,7 +149,8 @@ func TestExtractUserIDFromJWT_InvalidAuthHeaderFormat(t *testing.T) {
 
 func TestExtractUserIDFromJWT_CachesValidToken(t *testing.T) {
 	t.Parallel()
-	cache := NewJWTCache()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
 
 	tokenStr := makeToken(t, jwt.MapClaims{
 		"userId": "cached-user",

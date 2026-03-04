@@ -21,7 +21,7 @@ type Proxy struct {
 }
 
 func New(cfg *config.Config) (*Proxy, error) {
-	r, err := NewRedis(cfg.RedisAddr, cfg.RedisPoolSize)
+	r, err := NewRedis(cfg.RedisAddr, cfg.RedisPoolSize, cfg.RedisMinIdleConns, cfg.RedisCBThreshold, cfg.RedisCBCooldown)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +36,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		redis:         r,
 		cache:         cache,
 		backends:      b,
-		jwtCache:      NewJWTCache(),
+		jwtCache:      NewJWTCache(cfg.JWTCacheMaxSize),
 		jwtSecret:     []byte(cfg.JWTSecret),
 		HealthChecker: NewHealthChecker(r),
 		rateLimiter:   NewRateLimiter(100, 200),
@@ -114,6 +114,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	IncBackendRequests(backend)
 	p.backends.ProxyRequest(w, r, backend)
+}
+
+// Stop gracefully shuts down background goroutines owned by the proxy.
+func (p *Proxy) Stop() {
+	p.jwtCache.Stop()
+	p.cache.Stop()
+	p.rateLimiter.Stop()
 }
 
 // isWebSocket returns true if the request is a WebSocket upgrade.

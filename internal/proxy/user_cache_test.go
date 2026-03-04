@@ -10,6 +10,7 @@ import (
 func TestUserCache_SetAndGet(t *testing.T) {
 	t.Parallel()
 	cache := NewUserCache(24 * time.Hour)
+	t.Cleanup(cache.Stop)
 
 	cache.Set("user-1", "http://backend-1:8080")
 
@@ -25,6 +26,7 @@ func TestUserCache_SetAndGet(t *testing.T) {
 func TestUserCache_MissForUnknownUser(t *testing.T) {
 	t.Parallel()
 	cache := NewUserCache(24 * time.Hour)
+	t.Cleanup(cache.Stop)
 
 	_, err := cache.Get("nonexistent-user")
 	if !errors.Is(err, ErrCacheMiss) {
@@ -35,6 +37,7 @@ func TestUserCache_MissForUnknownUser(t *testing.T) {
 func TestUserCache_ExpiredEntry(t *testing.T) {
 	t.Parallel()
 	cache := NewUserCache(24 * time.Hour)
+	t.Cleanup(cache.Stop)
 	// Override the TTL to a very short duration for testing
 	cache.ttl = time.Millisecond
 
@@ -52,6 +55,7 @@ func TestUserCache_ExpiredEntry(t *testing.T) {
 func TestUserCache_MultipleUsers(t *testing.T) {
 	t.Parallel()
 	cache := NewUserCache(24 * time.Hour)
+	t.Cleanup(cache.Stop)
 
 	users := map[string]string{
 		"user-a": "http://backend-a:8080",
@@ -78,6 +82,7 @@ func TestUserCache_MultipleUsers(t *testing.T) {
 func TestUserCache_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
 	cache := NewUserCache(24 * time.Hour)
+	t.Cleanup(cache.Stop)
 
 	const goroutines = 100
 	var wg sync.WaitGroup
@@ -102,6 +107,7 @@ func TestUserCache_ConcurrentAccess(t *testing.T) {
 func TestUserCache_OverwriteExistingEntry(t *testing.T) {
 	t.Parallel()
 	cache := NewUserCache(24 * time.Hour)
+	t.Cleanup(cache.Stop)
 
 	cache.Set("user-overwrite", "http://old-backend:8080")
 	cache.Set("user-overwrite", "http://new-backend:8080")
@@ -118,6 +124,7 @@ func TestUserCache_OverwriteExistingEntry(t *testing.T) {
 func TestUserCache_ExpiredEntryIsDeleted(t *testing.T) {
 	t.Parallel()
 	cache := NewUserCache(24 * time.Hour)
+	t.Cleanup(cache.Stop)
 	cache.ttl = time.Millisecond
 
 	cache.Set("user-expire-del", "http://backend:8080")
@@ -133,5 +140,37 @@ func TestUserCache_ExpiredEntryIsDeleted(t *testing.T) {
 	_, err = cache.Get("user-expire-del")
 	if !errors.Is(err, ErrCacheMiss) {
 		t.Fatalf("expected ErrCacheMiss after deletion, got %v", err)
+	}
+}
+
+func TestUserCache_BackgroundCleanup(t *testing.T) {
+	t.Parallel()
+	// Use a very short TTL so entries expire quickly.
+	cache := NewUserCache(time.Millisecond)
+	t.Cleanup(cache.Stop)
+
+	cache.Set("cleanup-user", "http://backend:8080")
+	time.Sleep(5 * time.Millisecond)
+
+	// Entry should be expired — Get returns miss.
+	_, err := cache.Get("cleanup-user")
+	if !errors.Is(err, ErrCacheMiss) {
+		t.Fatalf("expected ErrCacheMiss, got %v", err)
+	}
+}
+
+func TestUserCache_Stop(t *testing.T) {
+	t.Parallel()
+	cache := NewUserCache(24 * time.Hour)
+	cache.Stop()
+
+	// After Stop, Set/Get should still work (no panic).
+	cache.Set("after-stop", "http://backend:8080")
+	got, err := cache.Get("after-stop")
+	if err != nil {
+		t.Fatalf("expected no error after stop, got %v", err)
+	}
+	if got != "http://backend:8080" {
+		t.Errorf("expected %q, got %q", "http://backend:8080", got)
 	}
 }

@@ -15,15 +15,16 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	totalRequests  uint64
-	backendErrors  uint64
-	redisFailures  uint64
-	cacheHitsLocal uint64
-	cacheHitsRedis uint64
-	cacheMisses    uint64
-	authFailures   uint64
-	wsConnections  uint64
-	rateLimited    uint64
+	totalRequests    uint64
+	backendErrors    uint64
+	redisFailures    uint64
+	redisCBFallbacks uint64
+	cacheHitsLocal   uint64
+	cacheHitsRedis   uint64
+	cacheMisses      uint64
+	authFailures     uint64
+	wsConnections    uint64
+	rateLimited      uint64
 )
 
 // Per-backend request counts: map[backendName] -> *uint64
@@ -37,6 +38,9 @@ func IncBackendErrors() { atomic.AddUint64(&backendErrors, 1) }
 
 // IncRedisFailures increments stickyproxy_redis_failures_total.
 func IncRedisFailures() { atomic.AddUint64(&redisFailures, 1) }
+
+// IncRedisCBFallbacks increments stickyproxy_redis_cb_fallbacks_total.
+func IncRedisCBFallbacks() { atomic.AddUint64(&redisCBFallbacks, 1) }
 
 // IncCacheHitsLocal increments stickyproxy_cache_hits_total{layer="local"}.
 func IncCacheHitsLocal() { atomic.AddUint64(&cacheHitsLocal, 1) }
@@ -143,6 +147,10 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	writeCounter(&b, "stickyproxy_redis_failures_total",
 		"Total number of Redis failures",
 		atomic.LoadUint64(&redisFailures))
+
+	writeCounter(&b, "stickyproxy_redis_cb_fallbacks_total",
+		"Total hash-fallback requests due to Redis circuit breaker",
+		atomic.LoadUint64(&redisCBFallbacks))
 
 	// cache_hits_total with layer label
 	b.WriteString("# HELP stickyproxy_cache_hits_total Total cache hits by layer\n")
