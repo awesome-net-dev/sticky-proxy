@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -9,11 +10,25 @@ import (
 )
 
 type BackendManager struct {
-	failures sync.Map
+	failures  sync.Map
+	transport *http.Transport
 }
 
 func NewBackendManager(r *Redis) *BackendManager {
-	return &BackendManager{}
+	return &BackendManager{
+		transport: &http.Transport{
+			MaxIdleConns:          1000,
+			MaxIdleConnsPerHost:   100,
+			MaxConnsPerHost:       250,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+		},
+	}
 }
 
 func (b *BackendManager) Start() {}
@@ -34,6 +49,7 @@ func (b *BackendManager) ProxyRequest(
 
 	target, _ := url.Parse(backend)
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = b.transport
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		b.recordFailure(backend)

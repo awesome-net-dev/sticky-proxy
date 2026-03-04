@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
 type Proxy struct {
@@ -33,6 +34,10 @@ func New() (*Proxy, error) {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	atomic.AddUint64(&totalRequests, 1)
 
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	r = r.WithContext(ctx)
+
 	authHeader := r.Header.Get("Authorization")
 	jwtData, err := extractUserIDFromJWT(authHeader, p.jwtCache)
 	if err != nil {
@@ -44,7 +49,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	backend, err := p.cache.Get(stickyKey)
 	if err != nil {
 		backend, err = p.redis.AssignBackend(
-			context.Background(),
+			ctx,
 			stickyKey,
 			p.backends.Hash(stickyKey),
 		)
