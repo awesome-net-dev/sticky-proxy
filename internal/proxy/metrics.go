@@ -23,6 +23,7 @@ var (
 	cacheMisses    uint64
 	authFailures   uint64
 	wsConnections  uint64
+	rateLimited    uint64
 )
 
 // Per-backend request counts: map[backendName] -> *uint64
@@ -51,6 +52,9 @@ func IncAuthFailures() { atomic.AddUint64(&authFailures, 1) }
 
 // IncWebSocketConnections increments stickyproxy_websocket_connections_total.
 func IncWebSocketConnections() { atomic.AddUint64(&wsConnections, 1) }
+
+// IncRateLimited increments stickyproxy_rate_limited_total.
+func IncRateLimited() { atomic.AddUint64(&rateLimited, 1) }
 
 // IncBackendRequests increments stickyproxy_backend_requests_total{backend="name"}.
 func IncBackendRequests(backend string) {
@@ -161,6 +165,10 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	writeCounter(&b, "stickyproxy_websocket_connections_total",
 		"Total WebSocket connections opened",
 		atomic.LoadUint64(&wsConnections))
+
+	writeCounter(&b, "stickyproxy_rate_limited_total",
+		"Total requests rejected by rate limiter",
+		atomic.LoadUint64(&rateLimited))
 
 	// per-backend request counts
 	b.WriteString("# HELP stickyproxy_backend_requests_total Total requests per backend\n")
