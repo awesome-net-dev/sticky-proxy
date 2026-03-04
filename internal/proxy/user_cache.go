@@ -45,3 +45,21 @@ func (c *UserCache) Set(key, backend string) {
 		exp:     time.Now().Add(c.ttl),
 	})
 }
+
+// Invalidate deletes a specific user's sticky mapping from the local cache.
+func (c *UserCache) Invalidate(userID string) {
+	c.data.Delete(userID)
+}
+
+// InvalidateBackend scans all cached mappings and deletes every entry
+// whose backend matches the given address. This is O(n) over the cache
+// because sync.Map does not support lookup by value.
+func (c *UserCache) InvalidateBackend(backend string) {
+	c.data.Range(func(key, value any) bool {
+		entry := value.(*cacheEntry)
+		if entry.backend == backend {
+			c.data.Delete(key)
+		}
+		return true
+	})
+}

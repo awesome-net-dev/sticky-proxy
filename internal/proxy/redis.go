@@ -63,6 +63,32 @@ func (r *Redis) AssignBackend(
 	return res.(string), nil
 }
 
+// InvalidateBackend scans all sticky:* keys using SCAN (safe at scale)
+// and deletes every key whose value matches the given backend address.
+func (r *Redis) InvalidateBackend(ctx context.Context, backend string) error {
+	var cursor uint64
+	for {
+		keys, next, err := r.client.Scan(ctx, cursor, "sticky:*", 100).Result()
+		if err != nil {
+			return err
+		}
+		for _, key := range keys {
+			val, err := r.client.Get(ctx, key).Result()
+			if err != nil {
+				continue // key may have expired between SCAN and GET
+			}
+			if val == backend {
+				r.client.Del(ctx, key)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
+}
+
 // Ping checks if Redis is alive
 func (r *Redis) Ping() error {
 	return r.client.Ping(context.Background()).Err()

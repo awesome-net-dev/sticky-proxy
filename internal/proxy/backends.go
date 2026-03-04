@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,12 +16,16 @@ type BackendManager struct {
 	evictionThreshold int
 	evictionCooldown  time.Duration
 	transport         *http.Transport
+	cache             *UserCache
+	redis             *Redis
 }
 
-func NewBackendManager(r *Redis, evictionThreshold int, evictionCooldown time.Duration) *BackendManager {
+func NewBackendManager(r *Redis, cache *UserCache, evictionThreshold int, evictionCooldown time.Duration) *BackendManager {
 	return &BackendManager{
 		evictionThreshold: evictionThreshold,
 		evictionCooldown:  evictionCooldown,
+		cache:             cache,
+		redis:             r,
 		transport: &http.Transport{
 			MaxIdleConns:          1000,
 			MaxIdleConnsPerHost:   100,
@@ -47,7 +52,7 @@ func (b *BackendManager) ProxyRequest(
 	r *http.Request,
 	backend string,
 ) {
-	if !b.available(backend) {
+	if !b.Available(backend) {
 		slog.Warn("backend unavailable, circuit open", "backend", backend)
 		http.Error(w, "backend unavailable", http.StatusServiceUnavailable)
 		return
@@ -74,10 +79,22 @@ func (b *BackendManager) recordFailure(backend string) {
 	if f.count >= b.evictionThreshold {
 		f.until = time.Now().Add(b.evictionCooldown)
 		slog.Warn("backend circuit breaker opened", "backend", backend, "failureCount", f.count)
+		b.invalidateStickyMappings(backend)
 	}
 }
 
-func (b *BackendManager) available(backend string) bool {
+// invalidateStickyMappings clears all sticky session mappings for a backend
+// that has been evicted, so users are re-assigned on the next request.
+func (b *BackendManager) invalidateStickyMappings(backend string) {
+	b.cache.InvalidateBackend(backend)
+
+	if err := b.redis.InvalidateBackend(context.Background(), backend); err != nil {
+		slog.Error("failed to invalidate redis mappings", "backend", backend, "error", err)
+	}
+}
+
+// Available reports whether a backend is currently accepting traffic.
+func (b *BackendManager) Available(backend string) bool {
 	v, ok := b.failures.Load(backend)
 	if !ok {
 		return true
