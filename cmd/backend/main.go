@@ -56,7 +56,7 @@ func main() {
 
 	// HTTP handler
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Hello from %s\n", backendName)
+		_, _ = fmt.Fprintf(w, "Hello from %s\n", backendName)
 	})
 
 	// WebSocket handler
@@ -66,7 +66,7 @@ func main() {
 			slog.Error("websocket upgrade failed", "backend", backendName, "error", err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		for {
 			mt, message, err := conn.ReadMessage()
@@ -76,7 +76,7 @@ func main() {
 			}
 
 			if string(message) == "ping" {
-				conn.WriteMessage(mt, []byte("pong"))
+				_ = conn.WriteMessage(mt, []byte("pong"))
 			} else {
 				response := fmt.Sprintf("%s echo: %s", backendName, string(message))
 				if err := conn.WriteMessage(mt, []byte(response)); err != nil {
@@ -120,6 +120,7 @@ func main() {
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("backend forced shutdown", "backend", backendName, "error", err)
+		cancel()
 		os.Exit(1)
 	}
 

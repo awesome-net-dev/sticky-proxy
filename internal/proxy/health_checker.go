@@ -136,7 +136,7 @@ func (hc *HealthChecker) probe(ctx context.Context, client *http.Client, backend
 		hc.recordResult(ctx, backend, false)
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	hc.recordResult(ctx, backend, resp.StatusCode == http.StatusOK)
 }

@@ -69,7 +69,7 @@ func TestProxyServeHTTP_ValidJWTProxiesToBackend(t *testing.T) {
 	// Create a test backend that echoes a success response
 	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("proxied successfully"))
+		_, _ = w.Write([]byte("proxied successfully"))
 	}))
 	defer backendServer.Close()
 

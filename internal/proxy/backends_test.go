@@ -86,7 +86,7 @@ func TestBackendManager_ProxyRequest_Success(t *testing.T) {
 	// Create a test backend server
 	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("hello from backend"))
+		_, _ = w.Write([]byte("hello from backend"))
 	}))
 	defer backendServer.Close()
 
@@ -139,7 +139,7 @@ func TestBackendManager_ProxyRequest_BackendError(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hijack failed: %v", err)
 		}
-		conn.Close()
+		_ = conn.Close()
 	}))
 	defer backendServer.Close()
 

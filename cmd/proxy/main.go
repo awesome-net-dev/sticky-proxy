@@ -66,6 +66,7 @@ func main() {
 
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("proxy forced shutdown", "error", err)
+		cancel()
 		os.Exit(1)
 	}
 

@@ -91,7 +91,7 @@ func TestUserCache_ConcurrentAccess(t *testing.T) {
 
 		go func(id int) {
 			defer wg.Done()
-			cache.Get("concurrent-user")
+			_, _ = cache.Get("concurrent-user")
 		}(i)
 	}
 

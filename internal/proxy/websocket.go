@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/gorilla/websocket"
 )
@@ -14,15 +13,6 @@ var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
-}
-
-// isWebSocketUpgrade checks whether the incoming request is a WebSocket
-// upgrade request by inspecting the Connection and Upgrade headers.
-func isWebSocketUpgrade(r *http.Request) bool {
-	connHeader := strings.ToLower(r.Header.Get("Connection"))
-	upgradeHeader := strings.ToLower(r.Header.Get("Upgrade"))
-
-	return strings.Contains(connHeader, "upgrade") && upgradeHeader == "websocket"
 }
 
 // proxyWebSocket upgrades the client connection and dials the backend,
@@ -62,13 +52,13 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend string) {
 	backendConn, resp, err := websocket.DefaultDialer.Dial(backendURL.String(), reqHeader)
 	if err != nil {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		log.Printf("ws: backend dial error: %v", err)
 		http.Error(w, "websocket backend unavailable", http.StatusBadGateway)
 		return
 	}
-	defer backendConn.Close()
+	defer func() { _ = backendConn.Close() }()
 
 	// Upgrade the client connection.
 	clientConn, err := wsUpgrader.Upgrade(w, r, nil)
@@ -77,7 +67,7 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend string) {
 		// Upgrade already wrote the HTTP error response.
 		return
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// errc is used to signal that one direction has finished.
 	errc := make(chan error, 2)
@@ -105,7 +95,7 @@ func relayCopy(errc chan<- error, dst, src *websocket.Conn) {
 				websocket.CloseNormalClosure,
 				websocket.CloseGoingAway,
 			) {
-				dst.WriteMessage(
+				_ = dst.WriteMessage(
 					websocket.CloseMessage,
 					websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 				)

@@ -225,7 +225,7 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString(u64(totalCount))
 	b.WriteByte('\n')
 
-	w.Write([]byte(b.String()))
+	_, _ = w.Write([]byte(b.String()))
 }
 
 // ---------------------------------------------------------------------------

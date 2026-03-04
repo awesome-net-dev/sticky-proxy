@@ -21,12 +21,12 @@ func main() {
 		slog.Error("failed to create output file", "error", err)
 		os.Exit(1)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	writer.Write([]string{"userId", "jwt"})
+	_ = writer.Write([]string{"userId", "jwt"})
 
 	for i := 0; i < totalUsers; i++ {
 		claims := jwt.MapClaims{
@@ -42,6 +42,7 @@ func main() {
 
 		if err := writer.Write([]string{fmt.Sprintf("%d", i), signed}); err != nil {
 			slog.Error("failed to write csv row", "userId", i, "error", err)
+			writer.Flush()
 			os.Exit(1)
 		}
 
