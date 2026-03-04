@@ -4,9 +4,10 @@ RUN apk add --no-cache git ca-certificates
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o proxy ./cmd/proxy
+RUN CGO_ENABLED=0 go build -o proxy ./cmd/proxy
 
 FROM alpine:3.18
+RUN adduser -D -g '' appuser
 WORKDIR /app
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/proxy ./proxy
@@ -14,4 +15,5 @@ COPY internal/proxy/sticky.lua ./sticky.lua
 
 EXPOSE 8080
 
+USER appuser
 CMD ["./proxy"]
