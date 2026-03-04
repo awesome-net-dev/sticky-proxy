@@ -19,12 +19,13 @@ func New() (*Proxy, error) {
 		return nil, err
 	}
 
-	b := NewBackendManager(r)
+	cache := NewUserCache()
+	b := NewBackendManager(r, cache)
 	b.Start()
 
 	return &Proxy{
 		redis:    r,
-		cache:    NewUserCache(),
+		cache:    cache,
 		backends: b,
 		jwtCache: NewJWTCache(),
 	}, nil
@@ -42,6 +43,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	stickyKey := jwtData.UserID
 	backend, err := p.cache.Get(stickyKey)
+	if err == nil && !p.backends.Available(backend) {
+		// Backend was cached but has been evicted; discard stale entry
+		// so we fall through to Redis re-assignment below.
+		p.cache.Invalidate(stickyKey)
+		backend = ""
+		err = ErrCacheMiss
+	}
+
 	if err != nil {
 		backend, err = p.redis.AssignBackend(
 			context.Background(),
