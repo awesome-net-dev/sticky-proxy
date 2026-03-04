@@ -4,11 +4,17 @@ import (
 	"log"
 	"net/http"
 
+	"sticky-proxy/internal/config"
 	"sticky-proxy/internal/proxy"
 )
 
 func main() {
-	p, err := proxy.New()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
+	}
+
+	p, err := proxy.New(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -18,6 +24,6 @@ func main() {
 	mux.HandleFunc("/healthz", p.Healthz)
 	mux.HandleFunc("/metrics", proxy.Metrics)
 
-	log.Println("proxy listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	log.Printf("proxy listening on %s", cfg.ProxyPort)
+	log.Fatal(http.ListenAndServe(cfg.ProxyPort, mux))
 }

@@ -18,9 +18,9 @@ type UserCache struct {
 	data sync.Map // map[string]*cacheEntry
 }
 
-func NewUserCache() *UserCache {
+func NewUserCache(ttl time.Duration) *UserCache {
 	return &UserCache{
-		ttl: 24 * time.Hour,
+		ttl: ttl,
 	}
 }
 

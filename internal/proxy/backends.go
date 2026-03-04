@@ -9,11 +9,16 @@ import (
 )
 
 type BackendManager struct {
-	failures sync.Map
+	failures           sync.Map
+	evictionThreshold  int
+	evictionCooldown   time.Duration
 }
 
-func NewBackendManager(r *Redis) *BackendManager {
-	return &BackendManager{}
+func NewBackendManager(r *Redis, evictionThreshold int, evictionCooldown time.Duration) *BackendManager {
+	return &BackendManager{
+		evictionThreshold: evictionThreshold,
+		evictionCooldown:  evictionCooldown,
+	}
 }
 
 func (b *BackendManager) Start() {}
@@ -48,8 +53,8 @@ func (b *BackendManager) recordFailure(backend string) {
 	f := v.(*failure)
 
 	f.count++
-	if f.count >= 3 {
-		f.until = time.Now().Add(time.Minute)
+	if f.count >= b.evictionThreshold {
+		f.until = time.Now().Add(b.evictionCooldown)
 	}
 }
 

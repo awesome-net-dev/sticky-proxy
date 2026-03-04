@@ -16,9 +16,10 @@ type Redis struct {
 //go:embed sticky.lua
 var stickyLua string
 
-func NewRedis() (*Redis, error) {
+func NewRedis(addr string, poolSize int) (*Redis, error) {
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "redis:6379",
+		Addr:     addr,
+		PoolSize: poolSize,
 	})
 
 	return &Redis{
