@@ -12,11 +12,6 @@ type Assignment struct {
 	Source     string    `json:"source"` // "hash", "assignment", "discovery"
 }
 
-func (a *Assignment) marshal() (string, error) {
-	b, err := json.Marshal(a)
-	return string(b), err
-}
-
 func unmarshalAssignment(data string) (*Assignment, error) {
 	var a Assignment
 	err := json.Unmarshal([]byte(data), &a)
