@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -23,6 +24,7 @@ type Proxy struct {
 	discovery     *AccountDiscovery
 	HealthChecker *HealthChecker
 	rateLimiter   *RateLimiter
+	closers       []io.Closer
 }
 
 func New(cfg *config.Config) (*Proxy, error) {
@@ -43,6 +45,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 	drain := NewDrainManager(r, hooks, cache, cfg.RoutingMode, cfg.DrainTimeout, cfg.DrainMaxConcurrent)
 
 	var discovery *AccountDiscovery
+	var closers []io.Closer
 	if cfg.AccountsDiscovery != "" {
 		var source AccountSource
 		switch cfg.AccountsDiscovery {
@@ -50,6 +53,13 @@ func New(cfg *config.Config) (*Proxy, error) {
 			source = NewRedisAccountSource(r.client, cfg.AccountsQuery)
 		case "http":
 			source = NewHTTPAccountSource(cfg.AccountsQuery)
+		case "postgres":
+			pgSource, pgErr := NewPostgresAccountSource(cfg.PostgresDSN, cfg.AccountsQuery)
+			if pgErr != nil {
+				return nil, pgErr
+			}
+			source = pgSource
+			closers = append(closers, pgSource)
 		}
 		discovery = NewAccountDiscovery(source, cfg.AccountsRefreshInterval, r, hooks)
 	}
@@ -87,6 +97,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		discovery:     discovery,
 		HealthChecker: hc,
 		rateLimiter:   NewRateLimiter(100, 200),
+		closers:       closers,
 	}, nil
 }
 
@@ -180,6 +191,9 @@ func (p *Proxy) StartDiscovery(ctx context.Context) {
 func (p *Proxy) Stop() {
 	if p.discovery != nil {
 		p.discovery.Stop()
+	}
+	for _, c := range p.closers {
+		_ = c.Close()
 	}
 	p.jwtCache.Stop()
 	p.cache.Stop()

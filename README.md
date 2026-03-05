@@ -9,7 +9,7 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Two routing modes** — hash-based routing (default) or assignment-table routing with least-loaded backend selection
 - **Assign/unassign hooks** — notifies backends when users are assigned or removed, enabling stateful preloading and teardown
 - **Graceful drain** — drains backends by unassigning all users with concurrent hook notifications before removal
-- **Account discovery** — pre-assigns accounts to backends from Redis sets or HTTP endpoints, even when no client is connected
+- **Account discovery** — pre-assigns accounts to backends from Redis sets, HTTP endpoints, or PostgreSQL queries, even when no client is connected
 - **Rebalancing** — redistributes users across backends on scale events using least-loaded or consistent-hash strategies
 - **WebSocket support** — full bidirectional proxying with sticky session persistence
 - **Circuit breakers** — for both Redis and individual backends, with automatic CRC32 hash fallback when Redis is unavailable
@@ -433,9 +433,15 @@ When enabled, the proxy sends:
 
 | Variable | Default | Description |
 |---|---|---|
-| `ACCOUNTS_DISCOVERY` | *(empty)* | Discovery source: `redis` or `http` (requires `ROUTING_MODE=assignment`) |
-| `ACCOUNTS_QUERY` | *(empty)* | Redis set key or HTTP URL for account discovery |
+| `ACCOUNTS_DISCOVERY` | *(empty)* | Discovery source: `redis`, `http`, or `postgres` (requires `ROUTING_MODE=assignment`) |
+| `ACCOUNTS_QUERY` | *(empty)* | Redis set key, HTTP URL, or SQL query for account discovery |
 | `ACCOUNTS_REFRESH_INTERVAL` | `30s` | How often to reconcile discovered accounts |
+| `POSTGRES_DSN` | *(empty)* | PostgreSQL connection string (required when `ACCOUNTS_DISCOVERY=postgres`) |
+
+When using `postgres` discovery, `ACCOUNTS_QUERY` should be a SQL query that returns a single text column of account IDs, e.g.:
+```sql
+SELECT account_id FROM accounts WHERE active = true
+```
 
 ### Rebalancing
 
@@ -549,8 +555,9 @@ internal/
     assign.lua        # Redis Lua script for assignment-table routing
     sticky.lua        # Redis Lua script for hash-based routing
     discovery.go      # account discovery orchestrator
-    discovery_redis.go # Redis set account source
-    discovery_http.go  # HTTP JSON account source
+    discovery_redis.go    # Redis set account source
+    discovery_http.go     # HTTP JSON account source
+    discovery_postgres.go # PostgreSQL query account source
     rebalancer.go     # rebalancing strategies and executor
 pkg/
   ownership/          # backend ownership checker (Redis MGET on sticky:* keys)

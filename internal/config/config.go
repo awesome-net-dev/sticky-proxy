@@ -33,6 +33,7 @@ type Config struct {
 	AccountsDiscovery       string
 	AccountsQuery           string
 	AccountsRefreshInterval time.Duration
+	PostgresDSN             string
 	RebalanceStrategy       string
 	RebalanceOnScale        bool
 	RebalanceMaxConcurrent  int
@@ -164,14 +165,17 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid ROUTING_MODE %q: must be \"hash\" or \"assignment\"", cfg.RoutingMode)
 	}
 
-	// ACCOUNTS_DISCOVERY — default "" (disabled), options: "redis", "http"
+	// ACCOUNTS_DISCOVERY — default "" (disabled), options: "redis", "http", "postgres"
 	cfg.AccountsDiscovery = os.Getenv("ACCOUNTS_DISCOVERY")
-	if cfg.AccountsDiscovery != "" && cfg.AccountsDiscovery != "redis" && cfg.AccountsDiscovery != "http" {
-		return nil, fmt.Errorf("invalid ACCOUNTS_DISCOVERY %q: must be \"\", \"redis\", or \"http\"", cfg.AccountsDiscovery)
+	if cfg.AccountsDiscovery != "" && cfg.AccountsDiscovery != "redis" && cfg.AccountsDiscovery != "http" && cfg.AccountsDiscovery != "postgres" {
+		return nil, fmt.Errorf("invalid ACCOUNTS_DISCOVERY %q: must be \"\", \"redis\", \"http\", or \"postgres\"", cfg.AccountsDiscovery)
 	}
 
-	// ACCOUNTS_QUERY — query/URL for account source
+	// ACCOUNTS_QUERY — Redis set key, HTTP URL, or SQL query for account source
 	cfg.AccountsQuery = os.Getenv("ACCOUNTS_QUERY")
+
+	// POSTGRES_DSN — required when ACCOUNTS_DISCOVERY=postgres
+	cfg.PostgresDSN = os.Getenv("POSTGRES_DSN")
 
 	// ACCOUNTS_REFRESH_INTERVAL — default 30s
 	accountsInterval, err := parseDuration("ACCOUNTS_REFRESH_INTERVAL", 30*time.Second)
@@ -199,6 +203,9 @@ func Load() (*Config, error) {
 	// Cross-field validation
 	if cfg.AccountsDiscovery != "" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY requires ROUTING_MODE=assignment")
+	}
+	if cfg.AccountsDiscovery == "postgres" && cfg.PostgresDSN == "" {
+		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY=postgres requires POSTGRES_DSN")
 	}
 	if cfg.RebalanceStrategy != "none" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("REBALANCE_STRATEGY requires ROUTING_MODE=assignment")
