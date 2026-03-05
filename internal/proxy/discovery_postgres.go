@@ -31,7 +31,7 @@ func (s *PostgresAccountSource) FetchAccounts(ctx context.Context) ([]string, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var accounts []string
 	for rows.Next() {
