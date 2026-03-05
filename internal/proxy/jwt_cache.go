@@ -7,10 +7,8 @@ import (
 )
 
 type CachedJWT struct {
-	UserID   string
-	OrgID    string
-	TenantID string
-	Exp      time.Time
+	RoutingKey string
+	Exp        time.Time
 }
 
 type JWTCache struct {

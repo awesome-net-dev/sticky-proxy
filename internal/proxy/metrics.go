@@ -15,17 +15,26 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	totalRequests    uint64
-	backendErrors    uint64
-	redisFailures    uint64
-	redisCBFallbacks uint64
-	cacheHitsLocal   uint64
-	cacheHitsRedis   uint64
-	cacheMisses      uint64
-	authFailures     uint64
-	wsConnections    uint64
-	rateLimited      uint64
+	totalRequests       uint64
+	backendErrors       uint64
+	redisFailures       uint64
+	redisCBFallbacks    uint64
+	cacheHitsLocal      uint64
+	cacheHitsRedis      uint64
+	cacheMisses         uint64
+	authFailures        uint64
+	wsConnections       uint64
+	rateLimited         uint64
+	hookAssigns         uint64
+	hookUnassigns       uint64
+	hookFailures        uint64
+	drainsTotal         uint64
+	drainUsersTotal     uint64
+	rebalanceTotal      uint64
+	rebalanceMovesTotal uint64
 )
+
+var drainingBackends int64
 
 // Per-backend request counts: map[backendName] -> *uint64
 var backendRequests sync.Map
@@ -59,6 +68,33 @@ func IncWebSocketConnections() { atomic.AddUint64(&wsConnections, 1) }
 
 // IncRateLimited increments stickyproxy_rate_limited_total.
 func IncRateLimited() { atomic.AddUint64(&rateLimited, 1) }
+
+// IncHookAssigns increments stickyproxy_hook_assigns_total.
+func IncHookAssigns() { atomic.AddUint64(&hookAssigns, 1) }
+
+// IncHookUnassigns increments stickyproxy_hook_unassigns_total.
+func IncHookUnassigns() { atomic.AddUint64(&hookUnassigns, 1) }
+
+// IncHookFailures increments stickyproxy_hook_failures_total.
+func IncHookFailures() { atomic.AddUint64(&hookFailures, 1) }
+
+// IncDrains increments stickyproxy_drains_total.
+func IncDrains() { atomic.AddUint64(&drainsTotal, 1) }
+
+// IncDrainUsers increments stickyproxy_drain_users_total.
+func IncDrainUsers() { atomic.AddUint64(&drainUsersTotal, 1) }
+
+// IncDrainingBackends increments stickyproxy_draining_backends gauge.
+func IncDrainingBackends() { atomic.AddInt64(&drainingBackends, 1) }
+
+// DecDrainingBackends decrements stickyproxy_draining_backends gauge.
+func DecDrainingBackends() { atomic.AddInt64(&drainingBackends, -1) }
+
+// IncRebalances increments stickyproxy_rebalances_total.
+func IncRebalances() { atomic.AddUint64(&rebalanceTotal, 1) }
+
+// IncRebalanceMoves increments stickyproxy_rebalance_moves_total.
+func IncRebalanceMoves() { atomic.AddUint64(&rebalanceMovesTotal, 1) }
 
 // IncBackendRequests increments stickyproxy_backend_requests_total{backend="name"}.
 func IncBackendRequests(backend string) {
@@ -178,6 +214,34 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 		"Total requests rejected by rate limiter",
 		atomic.LoadUint64(&rateLimited))
 
+	writeCounter(&b, "stickyproxy_hook_assigns_total",
+		"Total assign hooks sent",
+		atomic.LoadUint64(&hookAssigns))
+
+	writeCounter(&b, "stickyproxy_hook_unassigns_total",
+		"Total unassign hooks sent",
+		atomic.LoadUint64(&hookUnassigns))
+
+	writeCounter(&b, "stickyproxy_hook_failures_total",
+		"Total hook delivery failures",
+		atomic.LoadUint64(&hookFailures))
+
+	writeCounter(&b, "stickyproxy_drains_total",
+		"Total drain operations started",
+		atomic.LoadUint64(&drainsTotal))
+
+	writeCounter(&b, "stickyproxy_drain_users_total",
+		"Total users drained from backends",
+		atomic.LoadUint64(&drainUsersTotal))
+
+	writeCounter(&b, "stickyproxy_rebalances_total",
+		"Total rebalance operations",
+		atomic.LoadUint64(&rebalanceTotal))
+
+	writeCounter(&b, "stickyproxy_rebalance_moves_total",
+		"Total user moves during rebalancing",
+		atomic.LoadUint64(&rebalanceMovesTotal))
+
 	// per-backend request counts
 	b.WriteString("# HELP stickyproxy_backend_requests_total Total requests per backend\n")
 	b.WriteString("# TYPE stickyproxy_backend_requests_total counter\n")
@@ -201,6 +265,10 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	writeGauge(&b, "stickyproxy_healthy_backends",
 		"Number of healthy backends",
 		atomic.LoadInt64(&healthyBackends))
+
+	writeGauge(&b, "stickyproxy_draining_backends",
+		"Number of backends currently being drained",
+		atomic.LoadInt64(&drainingBackends))
 
 	// --- Histogram ---------------------------------------------------------
 

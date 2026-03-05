@@ -12,8 +12,8 @@ func TestJWTCache_StoreAndRetrieve(t *testing.T) {
 	t.Cleanup(cache.Stop)
 
 	cached := &CachedJWT{
-		UserID: "user-1",
-		Exp:    time.Now().Add(time.Hour),
+		RoutingKey: "user-1",
+		Exp:        time.Now().Add(time.Hour),
 	}
 	cache.Set("token-abc", cached)
 
@@ -21,8 +21,8 @@ func TestJWTCache_StoreAndRetrieve(t *testing.T) {
 	if !ok {
 		t.Fatal("expected cache hit, got miss")
 	}
-	if got.UserID != "user-1" {
-		t.Errorf("expected UserID %q, got %q", "user-1", got.UserID)
+	if got.RoutingKey != "user-1" {
+		t.Errorf("expected RoutingKey %q, got %q", "user-1", got.RoutingKey)
 	}
 }
 
@@ -32,8 +32,8 @@ func TestJWTCache_ExpiredTokenNotReturned(t *testing.T) {
 	t.Cleanup(cache.Stop)
 
 	cached := &CachedJWT{
-		UserID: "user-expired",
-		Exp:    time.Now().Add(-time.Second), // already expired
+		RoutingKey: "user-expired",
+		Exp:        time.Now().Add(-time.Second), // already expired
 	}
 	cache.Set("token-expired", cached)
 
@@ -68,8 +68,8 @@ func TestJWTCache_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			cached := &CachedJWT{
-				UserID: "user",
-				Exp:    time.Now().Add(time.Hour),
+				RoutingKey: "user",
+				Exp:        time.Now().Add(time.Hour),
 			}
 			cache.Set("concurrent-token", cached)
 		}(i)
@@ -90,8 +90,8 @@ func TestJWTCache_ExpiredEntryIsDeleted(t *testing.T) {
 	t.Cleanup(cache.Stop)
 
 	cached := &CachedJWT{
-		UserID: "user-del",
-		Exp:    time.Now().Add(-time.Millisecond),
+		RoutingKey: "user-del",
+		Exp:        time.Now().Add(-time.Millisecond),
 	}
 	cache.Set("token-del", cached)
 
@@ -115,9 +115,9 @@ func TestJWTCache_MultipleTokens(t *testing.T) {
 	t.Cleanup(cache.Stop)
 
 	tokens := map[string]*CachedJWT{
-		"token-a": {UserID: "user-a", Exp: time.Now().Add(time.Hour)},
-		"token-b": {UserID: "user-b", Exp: time.Now().Add(time.Hour)},
-		"token-c": {UserID: "user-c", Exp: time.Now().Add(time.Hour)},
+		"token-a": {RoutingKey: "user-a", Exp: time.Now().Add(time.Hour)},
+		"token-b": {RoutingKey: "user-b", Exp: time.Now().Add(time.Hour)},
+		"token-c": {RoutingKey: "user-c", Exp: time.Now().Add(time.Hour)},
 	}
 
 	for k, v := range tokens {
@@ -130,8 +130,8 @@ func TestJWTCache_MultipleTokens(t *testing.T) {
 			t.Errorf("cache miss for %s", k)
 			continue
 		}
-		if got.UserID != want.UserID {
-			t.Errorf("token %s: expected UserID %q, got %q", k, want.UserID, got.UserID)
+		if got.RoutingKey != want.RoutingKey {
+			t.Errorf("token %s: expected RoutingKey %q, got %q", k, want.RoutingKey, got.RoutingKey)
 		}
 	}
 }
@@ -141,9 +141,9 @@ func TestJWTCache_CleanupRemovesExpired(t *testing.T) {
 	cache := NewJWTCache(0)
 	t.Cleanup(cache.Stop)
 
-	cache.Set("expired-1", &CachedJWT{UserID: "u1", Exp: time.Now().Add(-time.Second)})
-	cache.Set("expired-2", &CachedJWT{UserID: "u2", Exp: time.Now().Add(-time.Second)})
-	cache.Set("valid-1", &CachedJWT{UserID: "u3", Exp: time.Now().Add(time.Hour)})
+	cache.Set("expired-1", &CachedJWT{RoutingKey: "u1", Exp: time.Now().Add(-time.Second)})
+	cache.Set("expired-2", &CachedJWT{RoutingKey: "u2", Exp: time.Now().Add(-time.Second)})
+	cache.Set("valid-1", &CachedJWT{RoutingKey: "u3", Exp: time.Now().Add(time.Hour)})
 
 	cache.sweep()
 
@@ -169,8 +169,8 @@ func TestJWTCache_MaxSizeEviction(t *testing.T) {
 	// Insert 10 valid entries.
 	for i := 0; i < 10; i++ {
 		cache.Set("tok-"+string(rune('A'+i)), &CachedJWT{
-			UserID: "user",
-			Exp:    time.Now().Add(time.Hour),
+			RoutingKey: "user",
+			Exp:        time.Now().Add(time.Hour),
 		})
 	}
 
@@ -195,7 +195,7 @@ func TestJWTCache_Stop(t *testing.T) {
 
 	// After Stop, the goroutine should have exited.
 	// Calling Set/Get should still work (no panic).
-	cache.Set("after-stop", &CachedJWT{UserID: "u", Exp: time.Now().Add(time.Hour)})
+	cache.Set("after-stop", &CachedJWT{RoutingKey: "u", Exp: time.Now().Add(time.Hour)})
 	if _, ok := cache.Get("after-stop"); !ok {
 		t.Error("expected cache hit after stop")
 	}

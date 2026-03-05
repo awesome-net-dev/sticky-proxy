@@ -18,14 +18,16 @@ type BackendManager struct {
 	transport         *http.Transport
 	cache             *UserCache
 	redis             *Redis
+	hooks             *HookClient
 }
 
-func NewBackendManager(r *Redis, cache *UserCache, evictionThreshold int, evictionCooldown time.Duration) *BackendManager {
+func NewBackendManager(r *Redis, cache *UserCache, evictionThreshold int, evictionCooldown time.Duration, hooks *HookClient) *BackendManager {
 	return &BackendManager{
 		evictionThreshold: evictionThreshold,
 		evictionCooldown:  evictionCooldown,
 		cache:             cache,
 		redis:             r,
+		hooks:             hooks,
 		transport: &http.Transport{
 			MaxIdleConns:          1000,
 			MaxIdleConnsPerHost:   100,
@@ -92,13 +94,27 @@ func (b *BackendManager) recordFailure(backend string) {
 
 // invalidateStickyMappings clears all sticky session mappings for a backend
 // that has been evicted, so users are re-assigned on the next request.
+// If hooks are enabled, unassign hooks are sent before deleting mappings.
 func (b *BackendManager) invalidateStickyMappings(backend string) {
+	ctx := context.Background()
+
+	if b.hooks != nil && b.redis != nil {
+		users, err := b.redis.GetUsersForBackend(ctx, backend)
+		if err != nil {
+			slog.Error("failed to get users for backend", "backend", backend, "error", err)
+		} else {
+			for _, user := range users {
+				b.hooks.SendUnassign(ctx, backend, user)
+			}
+		}
+	}
+
 	if b.cache != nil {
 		b.cache.InvalidateBackend(backend)
 	}
 
 	if b.redis != nil {
-		if err := b.redis.InvalidateBackend(context.Background(), backend); err != nil {
+		if err := b.redis.InvalidateBackend(ctx, backend); err != nil {
 			slog.Error("failed to invalidate redis mappings", "backend", backend, "error", err)
 		}
 	}

@@ -17,11 +17,12 @@ func newTestProxy(t *testing.T) *Proxy {
 	jwtCache := NewJWTCache(0)
 	rl := NewRateLimiter(100, 200)
 	p := &Proxy{
-		cache:       cache,
-		jwtCache:    jwtCache,
-		backends:    NewBackendManager(nil, nil, 3, time.Minute),
-		jwtSecret:   testSecretBytes,
-		rateLimiter: rl,
+		cache:        cache,
+		jwtCache:     jwtCache,
+		backends:     NewBackendManager(nil, nil, 3, time.Minute, nil),
+		jwtSecret:    testSecretBytes,
+		routingClaim: "userId",
+		rateLimiter:  rl,
 	}
 	t.Cleanup(p.Stop)
 	return p

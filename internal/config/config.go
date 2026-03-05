@@ -9,19 +9,33 @@ import (
 
 // Config holds all configuration values for the sticky-proxy.
 type Config struct {
-	ProxyPort             string
-	RedisAddr             string
-	JWTSecret             string
-	CacheTTL              time.Duration
-	RedisPoolSize         int
-	RedisMinIdleConns     int
-	RedisCBThreshold      int
-	RedisCBCooldown       time.Duration
-	JWTCacheMaxSize       int
-	EvictionThreshold     int
-	EvictionCooldown      time.Duration
-	BackendHealthInterval time.Duration
-	LogFormat             string
+	ProxyPort               string
+	RedisAddr               string
+	JWTSecret               string
+	CacheTTL                time.Duration
+	RedisPoolSize           int
+	RedisMinIdleConns       int
+	RedisCBThreshold        int
+	RedisCBCooldown         time.Duration
+	JWTCacheMaxSize         int
+	EvictionThreshold       int
+	EvictionCooldown        time.Duration
+	BackendHealthInterval   time.Duration
+	LogFormat               string
+	RoutingClaim            string
+	HooksEnabled            bool
+	HooksTimeout            time.Duration
+	HooksRetries            int
+	DrainTimeout            time.Duration
+	DrainMaxConcurrent      int
+	DrainOnUnhealthy        bool
+	RoutingMode             string
+	AccountsDiscovery       string
+	AccountsQuery           string
+	AccountsRefreshInterval time.Duration
+	RebalanceStrategy       string
+	RebalanceOnScale        bool
+	RebalanceMaxConcurrent  int
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -106,6 +120,89 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid BACKEND_HEALTH_INTERVAL: %w", err)
 	}
 	cfg.BackendHealthInterval = healthInterval
+
+	// ROUTING_CLAIM — default "sub"
+	cfg.RoutingClaim = envOrDefault("ROUTING_CLAIM", "sub")
+
+	// HOOKS_ENABLED — default false
+	cfg.HooksEnabled = os.Getenv("HOOKS_ENABLED") == "true"
+
+	// HOOKS_TIMEOUT — default 5s
+	hooksTimeout, err := parseDuration("HOOKS_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid HOOKS_TIMEOUT: %w", err)
+	}
+	cfg.HooksTimeout = hooksTimeout
+
+	// HOOKS_RETRIES — default 2
+	hooksRetries, err := parseInt("HOOKS_RETRIES", 2)
+	if err != nil {
+		return nil, fmt.Errorf("invalid HOOKS_RETRIES: %w", err)
+	}
+	cfg.HooksRetries = hooksRetries
+
+	// DRAIN_TIMEOUT — default 60s
+	drainTimeout, err := parseDuration("DRAIN_TIMEOUT", 60*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DRAIN_TIMEOUT: %w", err)
+	}
+	cfg.DrainTimeout = drainTimeout
+
+	// DRAIN_MAX_CONCURRENT — default 10
+	drainMaxConcurrent, err := parseInt("DRAIN_MAX_CONCURRENT", 10)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DRAIN_MAX_CONCURRENT: %w", err)
+	}
+	cfg.DrainMaxConcurrent = drainMaxConcurrent
+
+	// DRAIN_ON_UNHEALTHY — default false
+	cfg.DrainOnUnhealthy = os.Getenv("DRAIN_ON_UNHEALTHY") == "true"
+
+	// ROUTING_MODE — default "hash", options: "hash", "assignment"
+	cfg.RoutingMode = envOrDefault("ROUTING_MODE", "hash")
+	if cfg.RoutingMode != "hash" && cfg.RoutingMode != "assignment" {
+		return nil, fmt.Errorf("invalid ROUTING_MODE %q: must be \"hash\" or \"assignment\"", cfg.RoutingMode)
+	}
+
+	// ACCOUNTS_DISCOVERY — default "" (disabled), options: "redis", "http"
+	cfg.AccountsDiscovery = os.Getenv("ACCOUNTS_DISCOVERY")
+	if cfg.AccountsDiscovery != "" && cfg.AccountsDiscovery != "redis" && cfg.AccountsDiscovery != "http" {
+		return nil, fmt.Errorf("invalid ACCOUNTS_DISCOVERY %q: must be \"\", \"redis\", or \"http\"", cfg.AccountsDiscovery)
+	}
+
+	// ACCOUNTS_QUERY — query/URL for account source
+	cfg.AccountsQuery = os.Getenv("ACCOUNTS_QUERY")
+
+	// ACCOUNTS_REFRESH_INTERVAL — default 30s
+	accountsInterval, err := parseDuration("ACCOUNTS_REFRESH_INTERVAL", 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ACCOUNTS_REFRESH_INTERVAL: %w", err)
+	}
+	cfg.AccountsRefreshInterval = accountsInterval
+
+	// REBALANCE_STRATEGY — default "none", options: "none", "least-loaded", "consistent-hash"
+	cfg.RebalanceStrategy = envOrDefault("REBALANCE_STRATEGY", "none")
+	if cfg.RebalanceStrategy != "none" && cfg.RebalanceStrategy != "least-loaded" && cfg.RebalanceStrategy != "consistent-hash" {
+		return nil, fmt.Errorf("invalid REBALANCE_STRATEGY %q: must be \"none\", \"least-loaded\", or \"consistent-hash\"", cfg.RebalanceStrategy)
+	}
+
+	// REBALANCE_ON_SCALE — default false
+	cfg.RebalanceOnScale = os.Getenv("REBALANCE_ON_SCALE") == "true"
+
+	// REBALANCE_MAX_CONCURRENT — default 10
+	rebalanceMaxConcurrent, err := parseInt("REBALANCE_MAX_CONCURRENT", 10)
+	if err != nil {
+		return nil, fmt.Errorf("invalid REBALANCE_MAX_CONCURRENT: %w", err)
+	}
+	cfg.RebalanceMaxConcurrent = rebalanceMaxConcurrent
+
+	// Cross-field validation
+	if cfg.AccountsDiscovery != "" && cfg.RoutingMode != "assignment" {
+		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY requires ROUTING_MODE=assignment")
+	}
+	if cfg.RebalanceStrategy != "none" && cfg.RoutingMode != "assignment" {
+		return nil, fmt.Errorf("REBALANCE_STRATEGY requires ROUTING_MODE=assignment")
+	}
 
 	// LOG_FORMAT — default "json", options: "json", "text"
 	cfg.LogFormat = envOrDefault("LOG_FORMAT", "json")

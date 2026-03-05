@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -19,10 +20,16 @@ type HealthChecker struct {
 	healthyThreshold   int
 	httpTimeout        time.Duration
 
+	drain            *DrainManager
+	drainOnUnhealthy bool
+	rebalancer       *Rebalancer
+	rebalanceOnScale bool
+
 	cancel context.CancelFunc
 
-	mu     sync.Mutex
-	states map[string]*backendHealth
+	mu               sync.Mutex
+	states           map[string]*backendHealth
+	previousBackends []string
 }
 
 type backendHealth struct {
@@ -133,6 +140,40 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 		}(backend)
 	}
 	wg.Wait()
+
+	// Detect backend set changes and trigger rebalancing.
+	if hc.rebalanceOnScale && hc.rebalancer != nil {
+		currentHealthy := hc.getHealthyBackends()
+		if !stringSliceEqual(hc.previousBackends, currentHealthy) && len(hc.previousBackends) > 0 {
+			hc.rebalancer.Trigger(ctx, currentHealthy)
+		}
+		hc.previousBackends = currentHealthy
+	}
+}
+
+func (hc *HealthChecker) getHealthyBackends() []string {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	var healthy []string
+	for b, s := range hc.states {
+		if s.healthy {
+			healthy = append(healthy, b)
+		}
+	}
+	sort.Strings(healthy)
+	return healthy
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // probe performs a single health check against a backend and updates state.
@@ -188,8 +229,12 @@ func (hc *HealthChecker) recordResult(ctx context.Context, backend string, succe
 			state.healthy = false
 			hc.mu.Unlock()
 			slog.Warn("backend became unhealthy, removing from active set", "backend", backend, "failures", hc.unhealthyThreshold)
-			if err := hc.redis.RemoveBackend(ctx, backend); err != nil {
-				slog.Error("health checker: failed to remove backend", "backend", backend, "error", err)
+			if hc.drainOnUnhealthy && hc.drain != nil {
+				hc.drain.StartDrain(backend)
+			} else {
+				if err := hc.redis.RemoveBackend(ctx, backend); err != nil {
+					slog.Error("health checker: failed to remove backend", "backend", backend, "error", err)
+				}
 			}
 			return
 		}

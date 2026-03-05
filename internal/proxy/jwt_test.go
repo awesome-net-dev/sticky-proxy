@@ -30,12 +30,12 @@ func TestExtractUserIDFromJWT_ValidToken(t *testing.T) {
 		"exp":    float64(time.Now().Add(time.Hour).Unix()),
 	})
 
-	result, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
+	result, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes, "userId")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.UserID != "user-123" {
-		t.Errorf("expected UserID %q, got %q", "user-123", result.UserID)
+	if result.RoutingKey != "user-123" {
+		t.Errorf("expected RoutingKey %q, got %q", "user-123", result.RoutingKey)
 	}
 }
 
@@ -49,7 +49,7 @@ func TestExtractUserIDFromJWT_ExpiredToken(t *testing.T) {
 		"exp":    float64(time.Now().Add(-time.Hour).Unix()),
 	})
 
-	_, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
+	_, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes, "userId")
 	if err == nil {
 		t.Fatal("expected error for expired token, got nil")
 	}
@@ -73,13 +73,13 @@ func TestExtractUserIDFromJWT_WrongSigningMethod(t *testing.T) {
 		t.Fatalf("failed to sign token: %v", err)
 	}
 
-	_, err = extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
+	_, err = extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes, "userId")
 	if err == nil {
 		t.Fatal("expected error for wrong signing method, got nil")
 	}
 }
 
-func TestExtractUserIDFromJWT_MissingUserIDClaim(t *testing.T) {
+func TestExtractUserIDFromJWT_MissingRoutingClaim(t *testing.T) {
 	t.Parallel()
 	cache := NewJWTCache(0)
 	t.Cleanup(cache.Stop)
@@ -89,13 +89,9 @@ func TestExtractUserIDFromJWT_MissingUserIDClaim(t *testing.T) {
 		"exp": float64(time.Now().Add(time.Hour).Unix()),
 	})
 
-	result, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
-	if err != nil {
-		t.Fatalf("expected no error (token itself is valid), got %v", err)
-	}
-	// userId claim is missing so it should be empty string
-	if result.UserID != "" {
-		t.Errorf("expected empty UserID when claim is missing, got %q", result.UserID)
+	_, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes, "userId")
+	if err == nil {
+		t.Fatal("expected error when routing claim is missing, got nil")
 	}
 }
 
@@ -104,7 +100,7 @@ func TestExtractUserIDFromJWT_MalformedToken(t *testing.T) {
 	cache := NewJWTCache(0)
 	t.Cleanup(cache.Stop)
 
-	_, err := extractUserIDFromJWT("Bearer not.a.valid.jwt.token", cache, testSecretBytes)
+	_, err := extractUserIDFromJWT("Bearer not.a.valid.jwt.token", cache, testSecretBytes, "userId")
 	if err == nil {
 		t.Fatal("expected error for malformed token, got nil")
 	}
@@ -115,7 +111,7 @@ func TestExtractUserIDFromJWT_EmptyToken(t *testing.T) {
 	cache := NewJWTCache(0)
 	t.Cleanup(cache.Stop)
 
-	_, err := extractUserIDFromJWT("", cache, testSecretBytes)
+	_, err := extractUserIDFromJWT("", cache, testSecretBytes, "userId")
 	if err == nil {
 		t.Fatal("expected error for empty auth header, got nil")
 	}
@@ -139,7 +135,7 @@ func TestExtractUserIDFromJWT_InvalidAuthHeaderFormat(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := extractUserIDFromJWT(tc.header, cache, testSecretBytes)
+			_, err := extractUserIDFromJWT(tc.header, cache, testSecretBytes, "userId")
 			if err == nil {
 				t.Errorf("expected error for header %q, got nil", tc.header)
 			}
@@ -158,18 +154,52 @@ func TestExtractUserIDFromJWT_CachesValidToken(t *testing.T) {
 	})
 
 	// First call parses the token
-	result1, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
+	result1, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes, "userId")
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 
 	// Second call should hit the cache
-	result2, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes)
+	result2, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes, "userId")
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 
-	if result1.UserID != result2.UserID {
-		t.Errorf("cached result differs: %q vs %q", result1.UserID, result2.UserID)
+	if result1.RoutingKey != result2.RoutingKey {
+		t.Errorf("cached result differs: %q vs %q", result1.RoutingKey, result2.RoutingKey)
+	}
+}
+
+func TestExtractUserIDFromJWT_CustomClaim(t *testing.T) {
+	t.Parallel()
+	cache := NewJWTCache(0)
+	t.Cleanup(cache.Stop)
+
+	tokenStr := makeToken(t, jwt.MapClaims{
+		"sub":       "sub-value",
+		"accountId": "acc-42",
+		"exp":       float64(time.Now().Add(time.Hour).Unix()),
+	})
+
+	// Extract using "sub" claim
+	result, err := extractUserIDFromJWT("Bearer "+tokenStr, cache, testSecretBytes, "sub")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.RoutingKey != "sub-value" {
+		t.Errorf("expected RoutingKey %q, got %q", "sub-value", result.RoutingKey)
+	}
+
+	// Use a different cache to avoid hitting the previous result
+	cache2 := NewJWTCache(0)
+	t.Cleanup(cache2.Stop)
+
+	// Extract using "accountId" claim
+	result2, err := extractUserIDFromJWT("Bearer "+tokenStr, cache2, testSecretBytes, "accountId")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result2.RoutingKey != "acc-42" {
+		t.Errorf("expected RoutingKey %q, got %q", "acc-42", result2.RoutingKey)
 	}
 }

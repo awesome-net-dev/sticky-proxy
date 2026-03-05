@@ -16,6 +16,11 @@ type Proxy struct {
 	backends      *BackendManager
 	jwtCache      *JWTCache
 	jwtSecret     []byte
+	routingClaim  string
+	routingMode   string
+	hooks         *HookClient
+	drain         *DrainManager
+	discovery     *AccountDiscovery
 	HealthChecker *HealthChecker
 	rateLimiter   *RateLimiter
 }
@@ -26,9 +31,46 @@ func New(cfg *config.Config) (*Proxy, error) {
 		return nil, err
 	}
 
+	var hooks *HookClient
+	if cfg.HooksEnabled {
+		hooks = NewHookClient(cfg.HooksTimeout, cfg.HooksRetries)
+	}
+
 	cache := NewUserCache(cfg.CacheTTL)
-	b := NewBackendManager(r, cache, cfg.EvictionThreshold, cfg.EvictionCooldown)
+	b := NewBackendManager(r, cache, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks)
 	b.Start()
+
+	drain := NewDrainManager(r, hooks, cache, cfg.RoutingMode, cfg.DrainTimeout, cfg.DrainMaxConcurrent)
+
+	var discovery *AccountDiscovery
+	if cfg.AccountsDiscovery != "" {
+		var source AccountSource
+		switch cfg.AccountsDiscovery {
+		case "redis":
+			source = NewRedisAccountSource(r.client, cfg.AccountsQuery)
+		case "http":
+			source = NewHTTPAccountSource(cfg.AccountsQuery)
+		}
+		discovery = NewAccountDiscovery(source, cfg.AccountsRefreshInterval, r, hooks)
+	}
+
+	var rebalancer *Rebalancer
+	if cfg.RebalanceStrategy != "none" {
+		var strategy RebalanceStrategy
+		switch cfg.RebalanceStrategy {
+		case "least-loaded":
+			strategy = &LeastLoadedStrategy{}
+		case "consistent-hash":
+			strategy = &ConsistentHashStrategy{}
+		}
+		rebalancer = NewRebalancer(strategy, cfg.RebalanceMaxConcurrent, r, hooks, cache)
+	}
+
+	hc := NewHealthChecker(r)
+	hc.drain = drain
+	hc.drainOnUnhealthy = cfg.DrainOnUnhealthy
+	hc.rebalancer = rebalancer
+	hc.rebalanceOnScale = cfg.RebalanceOnScale
 
 	slog.Info("proxy initialized")
 
@@ -38,7 +80,12 @@ func New(cfg *config.Config) (*Proxy, error) {
 		backends:      b,
 		jwtCache:      NewJWTCache(cfg.JWTCacheMaxSize),
 		jwtSecret:     []byte(cfg.JWTSecret),
-		HealthChecker: NewHealthChecker(r),
+		routingClaim:  cfg.RoutingClaim,
+		routingMode:   cfg.RoutingMode,
+		hooks:         hooks,
+		drain:         drain,
+		discovery:     discovery,
+		HealthChecker: hc,
 		rateLimiter:   NewRateLimiter(100, 200),
 	}, nil
 }
@@ -63,7 +110,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	authHeader := r.Header.Get("Authorization")
-	jwtData, err := extractUserIDFromJWT(authHeader, p.jwtCache, p.jwtSecret)
+	jwtData, err := extractUserIDFromJWT(authHeader, p.jwtCache, p.jwtSecret, p.routingClaim)
 	if err != nil {
 		IncAuthFailures()
 		slog.Warn("unauthorized request", "error", err, "path", r.URL.Path)
@@ -71,37 +118,41 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !p.rateLimiter.Allow(jwtData.UserID) {
+	if !p.rateLimiter.Allow(jwtData.RoutingKey) {
 		IncRateLimited()
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 
-	stickyKey := jwtData.UserID
+	stickyKey := jwtData.RoutingKey
 	backend, err := p.cache.Get(stickyKey)
-	if err == nil && !p.backends.Available(backend) {
+	if err == nil && (!p.backends.Available(backend) || (p.drain != nil && p.drain.IsDraining(backend))) {
 		p.cache.Invalidate(stickyKey)
 		backend = ""
 		err = ErrCacheMiss
 	}
 
 	if err != nil {
-		backend, err = p.redis.AssignBackend(
-			ctx,
-			stickyKey,
-			p.backends.Hash(stickyKey),
-		)
-		if err != nil {
+		var assignErr error
+		if p.routingMode == "assignment" {
+			backend, assignErr = p.assignViaTable(ctx, stickyKey)
+		} else {
+			backend, assignErr = p.redis.AssignBackend(ctx, stickyKey, p.backends.Hash(stickyKey))
+		}
+		if assignErr != nil {
 			IncCacheMisses()
 			IncBackendErrors()
-			slog.Error("failed to assign backend", "userId", stickyKey, "error", err)
+			slog.Error("failed to assign backend", "userId", stickyKey, "error", assignErr)
 			http.Error(w, "no backend", http.StatusServiceUnavailable)
 			return
 		}
 		IncCacheHitsRedis()
 		p.cache.Set(stickyKey, backend)
-		slog.Debug("assigned backend via redis", "userId", stickyKey, "backend", backend)
+		slog.Debug("assigned backend via redis", "userId", stickyKey, "backend", backend, "mode", p.routingMode)
+		if p.hooks != nil {
+			go p.hooks.SendAssign(context.Background(), backend, stickyKey)
+		}
 	} else {
 		IncCacheHitsLocal()
 		slog.Debug("cache hit", "userId", stickyKey, "backend", backend)
@@ -119,10 +170,45 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Stop gracefully shuts down background goroutines owned by the proxy.
+// StartDiscovery launches the account discovery loop if configured.
+func (p *Proxy) StartDiscovery(ctx context.Context) {
+	if p.discovery != nil {
+		go p.discovery.Start(ctx)
+	}
+}
+
 func (p *Proxy) Stop() {
+	if p.discovery != nil {
+		p.discovery.Stop()
+	}
 	p.jwtCache.Stop()
 	p.cache.Stop()
 	p.rateLimiter.Stop()
+}
+
+// assignViaTable uses the assignment-table routing mode (Redis hash).
+func (p *Proxy) assignViaTable(ctx context.Context, routingKey string) (string, error) {
+	if p.redis.isCBOpen() {
+		IncRedisCBFallbacks()
+		fb := p.redis.hashFallback(p.backends.Hash(routingKey))
+		if fb != "" {
+			return fb, nil
+		}
+	}
+
+	a, err := p.redis.AssignViaTable(ctx, routingKey)
+	if err != nil || a == nil {
+		p.redis.recordCBFailure()
+		IncRedisFailures()
+		fb := p.redis.hashFallback(p.backends.Hash(routingKey))
+		if fb != "" {
+			IncRedisCBFallbacks()
+			return fb, nil
+		}
+		return "", err
+	}
+	p.redis.recordCBSuccess()
+	return a.Backend, nil
 }
 
 // isWebSocket returns true if the request is a WebSocket upgrade.

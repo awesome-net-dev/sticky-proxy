@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -62,6 +63,29 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
+	})
+
+	// Assign/Unassign hook handlers
+	mux.HandleFunc("/hooks/assign", func(w http.ResponseWriter, r *http.Request) {
+		var payload struct{ User string }
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		oc.Track(payload.User)
+		slog.Info("assign hook received", "user", payload.User, "backend", backendName)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mux.HandleFunc("/hooks/unassign", func(w http.ResponseWriter, r *http.Request) {
+		var payload struct{ User string }
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		oc.Untrack(payload.User)
+		slog.Info("unassign hook received", "user", payload.User, "backend", backendName)
+		w.WriteHeader(http.StatusOK)
 	})
 
 	// HTTP handler

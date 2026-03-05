@@ -11,7 +11,8 @@ import (
 func extractUserIDFromJWT(
 	authHeader string,
 	cache *JWTCache,
-	jwtSecret []byte) (*CachedJWT, error) {
+	jwtSecret []byte,
+	routingClaim string) (*CachedJWT, error) {
 	parts := strings.SplitN(authHeader, " ", 2)
 	if len(parts) != 2 || parts[0] != "Bearer" {
 		return nil, errors.New("invalid auth header")
@@ -36,12 +37,15 @@ func extractUserIDFromJWT(
 
 	claims := token.Claims.(jwt.MapClaims)
 
-	userID, _ := claims["userId"].(string)
+	routingKey, _ := claims[routingClaim].(string)
+	if routingKey == "" {
+		return nil, errors.New("routing claim is empty or missing")
+	}
 	expUnix, _ := claims["exp"].(float64)
 
 	cached := &CachedJWT{
-		UserID: userID,
-		Exp:    time.Unix(int64(expUnix), 0),
+		RoutingKey: routingKey,
+		Exp:        time.Unix(int64(expUnix), 0),
 	}
 
 	cache.Set(tokenStr, cached)

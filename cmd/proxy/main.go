@@ -28,14 +28,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start the active health checker in the background.
+	// Start the active health checker and account discovery in the background.
 	healthCtx, healthCancel := context.WithCancel(context.Background())
 	go p.HealthChecker.Start(healthCtx)
+	p.StartDiscovery(healthCtx)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", p)
 	mux.HandleFunc("/healthz", p.Healthz)
 	mux.HandleFunc("/metrics", proxy.MetricsHandler)
+	mux.HandleFunc("POST /admin/drain", p.AdminDrainHandler)
+	mux.HandleFunc("GET /admin/drain", p.AdminDrainStatusHandler)
+	mux.HandleFunc("DELETE /admin/drain", p.AdminCancelDrainHandler)
+	mux.HandleFunc("GET /debug/routing", p.DebugRoutingHandler)
 
 	srv := &http.Server{
 		Addr:    cfg.ProxyPort,

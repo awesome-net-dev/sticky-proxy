@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"hash/crc32"
 	"log/slog"
 	"sync"
@@ -22,8 +23,9 @@ const (
 )
 
 type Redis struct {
-	client *redis.Client
-	script *redis.Script
+	client       *redis.Client
+	script       *redis.Script
+	assignScript *redis.Script
 
 	// Circuit breaker fields.
 	cbMu        sync.Mutex
@@ -40,6 +42,9 @@ type Redis struct {
 //go:embed sticky.lua
 var stickyLua string
 
+//go:embed assign.lua
+var assignLua string
+
 func NewRedis(addr string, poolSize, minIdleConns, cbThreshold int, cbCooldown time.Duration) (*Redis, error) {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         addr,
@@ -54,10 +59,11 @@ func NewRedis(addr string, poolSize, minIdleConns, cbThreshold int, cbCooldown t
 	slog.Info("redis client initialized", "addr", addr)
 
 	r := &Redis{
-		client:      rdb,
-		script:      redis.NewScript(stickyLua),
-		cbThreshold: cbThreshold,
-		cbCooldown:  cbCooldown,
+		client:       rdb,
+		script:       redis.NewScript(stickyLua),
+		assignScript: redis.NewScript(assignLua),
+		cbThreshold:  cbThreshold,
+		cbCooldown:   cbCooldown,
 	}
 	r.cachedBackends.Store([]string(nil))
 	return r, nil
@@ -214,4 +220,124 @@ func (r *Redis) AddBackend(ctx context.Context, backend string) error {
 // RemoveBackend removes a backend URL from the active set.
 func (r *Redis) RemoveBackend(ctx context.Context, backend string) error {
 	return r.client.SRem(ctx, "backends:active", backend).Err()
+}
+
+// GetUsersForBackend scans sticky:* keys and returns all user IDs
+// whose current assignment matches the given backend.
+func (r *Redis) GetUsersForBackend(ctx context.Context, backend string) ([]string, error) {
+	var users []string
+	var cursor uint64
+	for {
+		keys, next, err := r.client.Scan(ctx, cursor, "sticky:*", 100).Result()
+		if err != nil {
+			return users, err
+		}
+		for _, key := range keys {
+			val, err := r.client.Get(ctx, key).Result()
+			if err != nil {
+				continue
+			}
+			if val == backend {
+				// Extract userId from "sticky:{userId}"
+				users = append(users, key[len("sticky:"):])
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return users, nil
+}
+
+// --- Assignment-table mode methods ---
+
+// AssignViaTable runs the assign.lua script to atomically look up or create
+// an assignment in the Redis "assignments" hash. Uses least-loaded selection.
+func (r *Redis) AssignViaTable(ctx context.Context, routingKey string) (*Assignment, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := r.assignScript.Run(
+		ctx,
+		r.client,
+		[]string{"assignments", "backends:active", "assignment:counts"},
+		routingKey,
+		now,
+	).Result()
+
+	if err != nil || res == nil {
+		return nil, err
+	}
+
+	return unmarshalAssignment(res.(string))
+}
+
+// GetAssignment retrieves a single assignment from the Redis hash.
+func (r *Redis) GetAssignment(ctx context.Context, routingKey string) (*Assignment, error) {
+	val, err := r.client.HGet(ctx, "assignments", routingKey).Result()
+	if err != nil {
+		return nil, err
+	}
+	return unmarshalAssignment(val)
+}
+
+// DeleteAssignment removes an assignment and decrements the backend count.
+func (r *Redis) DeleteAssignment(ctx context.Context, routingKey string) error {
+	val, err := r.client.HGet(ctx, "assignments", routingKey).Result()
+	if err != nil {
+		return err
+	}
+	a, err := unmarshalAssignment(val)
+	if err != nil {
+		return err
+	}
+	pipe := r.client.Pipeline()
+	pipe.HDel(ctx, "assignments", routingKey)
+	pipe.HIncrBy(ctx, "assignment:counts", a.Backend, -1)
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+// GetAllAssignments returns all assignments from the Redis hash.
+func (r *Redis) GetAllAssignments(ctx context.Context) (map[string]*Assignment, error) {
+	vals, err := r.client.HGetAll(ctx, "assignments").Result()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]*Assignment, len(vals))
+	for k, v := range vals {
+		a, err := unmarshalAssignment(v)
+		if err != nil {
+			continue
+		}
+		result[k] = a
+	}
+	return result, nil
+}
+
+// GetBackendUsersFromTable scans the assignments hash and returns all
+// routing keys assigned to the given backend.
+func (r *Redis) GetBackendUsersFromTable(ctx context.Context, backend string) ([]string, error) {
+	var users []string
+	var cursor uint64
+	for {
+		keys, next, err := r.client.HScan(ctx, "assignments", cursor, "*", 100).Result()
+		if err != nil {
+			return users, err
+		}
+		// HScan returns alternating key, value pairs
+		for i := 0; i+1 < len(keys); i += 2 {
+			var a Assignment
+			if err := json.Unmarshal([]byte(keys[i+1]), &a); err != nil {
+				continue
+			}
+			if a.Backend == backend {
+				users = append(users, keys[i])
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return users, nil
 }
