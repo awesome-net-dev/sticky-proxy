@@ -26,14 +26,17 @@ func NewPostgresAccountSource(dsn, query string) (*PostgresAccountSource, error)
 
 // FetchAccounts executes the configured query and returns all values from the
 // first column as account IDs.
-func (s *PostgresAccountSource) FetchAccounts(ctx context.Context) ([]string, error) {
+func (s *PostgresAccountSource) FetchAccounts(ctx context.Context) (accounts []string, err error) {
 	rows, err := s.db.QueryContext(ctx, s.query)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if closeErr := rows.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 
-	var accounts []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
