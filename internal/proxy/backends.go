@@ -86,7 +86,7 @@ func (b *BackendManager) recordFailure(backend string) {
 
 	if shouldEvict {
 		slog.Warn("backend circuit breaker opened", "backend", backend, "failureCount", count)
-		b.invalidateStickyMappings(backend)
+		go b.invalidateStickyMappings(backend)
 	}
 }
 

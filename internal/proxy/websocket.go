@@ -10,17 +10,21 @@ import (
 )
 
 var wsUpgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
 }
 
+var wsDialer = &websocket.Dialer{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
 // proxyWebSocket upgrades the client connection and dials the backend,
 // then relays messages bidirectionally until either side closes.
 func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend string) {
-	// Build the backend WebSocket URL. The backend address is an HTTP URL
-	// like "http://backend1:8080", so we convert scheme and append the
-	// original request path.
 	backendURL, err := url.Parse(backend)
 	if err != nil {
 		http.Error(w, "bad backend address", http.StatusBadGateway)
@@ -36,7 +40,7 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend string) {
 	backendURL.Path = r.URL.Path
 	backendURL.RawQuery = r.URL.RawQuery
 
-	// Forward relevant headers to the backend (Authorization, cookies, etc.)
+	// Forward relevant headers to the backend.
 	reqHeader := http.Header{}
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		reqHeader.Set("Authorization", auth)
@@ -49,7 +53,7 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend string) {
 	}
 
 	// Dial the backend WebSocket endpoint.
-	backendConn, resp, err := websocket.DefaultDialer.Dial(backendURL.String(), reqHeader)
+	backendConn, resp, err := wsDialer.Dial(backendURL.String(), reqHeader)
 	if err != nil {
 		if resp != nil {
 			_ = resp.Body.Close()
@@ -64,33 +68,31 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend string) {
 	clientConn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("ws: client upgrade error: %v", err)
-		// Upgrade already wrote the HTTP error response.
 		return
 	}
 	defer func() { _ = clientConn.Close() }()
 
-	// errc is used to signal that one direction has finished.
-	errc := make(chan error, 2)
+	// Use a single channel to detect when one direction finishes.
+	done := make(chan struct{}, 1)
 
-	// client -> backend
-	go relayCopy(errc, backendConn, clientConn)
+	// client → backend in a separate goroutine.
+	go func() {
+		relay(backendConn, clientConn)
+		done <- struct{}{}
+	}()
 
-	// backend -> client
-	go relayCopy(errc, clientConn, backendConn)
+	// backend → client runs in the current goroutine (saves one goroutine).
+	relay(clientConn, backendConn)
 
-	// Wait for either direction to finish, then let deferred closes
-	// clean up both connections.
-	<-errc
+	// Wait for the other direction to notice the closed connection.
+	<-done
 }
 
-// relayCopy reads messages from src and writes them to dst.
-// When src sends a close message or an error occurs the function
-// returns the error on errc.
-func relayCopy(errc chan<- error, dst, src *websocket.Conn) {
+// relay reads messages from src and writes them to dst until an error occurs.
+func relay(dst, src *websocket.Conn) {
 	for {
 		msgType, msg, err := src.ReadMessage()
 		if err != nil {
-			// If we received a normal close, forward it to the other side.
 			if websocket.IsCloseError(err,
 				websocket.CloseNormalClosure,
 				websocket.CloseGoingAway,
@@ -100,17 +102,13 @@ func relayCopy(errc chan<- error, dst, src *websocket.Conn) {
 					websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 				)
 			}
-			// io.EOF is also expected on clean shutdown.
 			if err != io.EOF {
-				errc <- err
-			} else {
-				errc <- nil
+				log.Printf("ws: relay error: %v", err)
 			}
 			return
 		}
 
 		if err := dst.WriteMessage(msgType, msg); err != nil {
-			errc <- err
 			return
 		}
 	}

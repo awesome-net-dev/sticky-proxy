@@ -94,6 +94,9 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 		return
 	}
 
+	// Keep the Redis circuit-breaker fallback list warm.
+	hc.redis.RefreshBackendList(ctx)
+
 	// Merge newly discovered backends into the state map.
 	hc.mu.Lock()
 	knownURLs := make(map[string]struct{}, len(backends))
@@ -113,12 +116,23 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 
 	client := &http.Client{Timeout: hc.httpTimeout}
 
+	// Bounded-concurrency fan-out: probe all backends concurrently
+	// with a semaphore limiting to 10 concurrent probes.
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
 	for _, backend := range allBackends {
 		if ctx.Err() != nil {
-			return
+			break
 		}
-		hc.probe(ctx, client, backend)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(b string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			hc.probe(ctx, client, b)
+		}(backend)
 	}
+	wg.Wait()
 }
 
 // probe performs a single health check against a backend and updates state.

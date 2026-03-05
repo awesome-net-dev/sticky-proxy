@@ -14,6 +14,10 @@ type Config struct {
 	JWTSecret             string
 	CacheTTL              time.Duration
 	RedisPoolSize         int
+	RedisMinIdleConns     int
+	RedisCBThreshold      int
+	RedisCBCooldown       time.Duration
+	JWTCacheMaxSize       int
 	EvictionThreshold     int
 	EvictionCooldown      time.Duration
 	BackendHealthInterval time.Duration
@@ -53,6 +57,34 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid REDIS_POOL_SIZE: %w", err)
 	}
 	cfg.RedisPoolSize = poolSize
+
+	// REDIS_MIN_IDLE_CONNS — default 10
+	minIdle, err := parseInt("REDIS_MIN_IDLE_CONNS", 10)
+	if err != nil {
+		return nil, fmt.Errorf("invalid REDIS_MIN_IDLE_CONNS: %w", err)
+	}
+	cfg.RedisMinIdleConns = minIdle
+
+	// REDIS_CB_THRESHOLD — default 5 (failures before circuit opens)
+	cbThreshold, err := parseInt("REDIS_CB_THRESHOLD", 5)
+	if err != nil {
+		return nil, fmt.Errorf("invalid REDIS_CB_THRESHOLD: %w", err)
+	}
+	cfg.RedisCBThreshold = cbThreshold
+
+	// REDIS_CB_COOLDOWN — default 30s
+	cbCooldown, err := parseDuration("REDIS_CB_COOLDOWN", 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid REDIS_CB_COOLDOWN: %w", err)
+	}
+	cfg.RedisCBCooldown = cbCooldown
+
+	// JWT_CACHE_MAX_SIZE — default 100000
+	jwtCacheMax, err := parseInt("JWT_CACHE_MAX_SIZE", 100000)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JWT_CACHE_MAX_SIZE: %w", err)
+	}
+	cfg.JWTCacheMaxSize = jwtCacheMax
 
 	// EVICTION_THRESHOLD — default 3
 	threshold, err := parseInt("EVICTION_THRESHOLD", 3)

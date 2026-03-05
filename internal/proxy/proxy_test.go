@@ -10,18 +10,21 @@ import (
 )
 
 // newTestProxy creates a Proxy suitable for unit tests (no Redis).
-// It registers cleanup for the rate limiter's background goroutine.
+// It registers cleanup for all background goroutines.
 func newTestProxy(t *testing.T) *Proxy {
 	t.Helper()
+	cache := NewUserCache(24 * time.Hour)
+	jwtCache := NewJWTCache(0)
 	rl := NewRateLimiter(100, 200)
-	t.Cleanup(rl.Stop)
-	return &Proxy{
-		cache:       NewUserCache(24 * time.Hour),
-		jwtCache:    NewJWTCache(),
+	p := &Proxy{
+		cache:       cache,
+		jwtCache:    jwtCache,
 		backends:    NewBackendManager(nil, nil, 3, time.Minute),
 		jwtSecret:   testSecretBytes,
 		rateLimiter: rl,
 	}
+	t.Cleanup(p.Stop)
+	return p
 }
 
 // TestProxyServeHTTP_WithoutJWT verifies that requests without an Authorization
