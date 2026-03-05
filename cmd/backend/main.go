@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"sticky-proxy/pkg/ownership"
+
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 )
@@ -46,6 +48,14 @@ func main() {
 		break
 	}
 
+	// Start ownership checker — evicts users whose sticky mapping
+	// no longer points to this backend.
+	oc := ownership.New(rdb, backendAddr, func(userID string) {
+		slog.Warn("lost ownership, stopping background work", "userId", userID, "backend", backendName)
+		// Real backends would cancel background jobs, flush caches, etc.
+	})
+	go oc.Start()
+
 	mux := http.NewServeMux()
 
 	// Health check endpoint (liveness probe)
@@ -56,11 +66,18 @@ func main() {
 
 	// HTTP handler
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if userID := r.Header.Get("X-User-ID"); userID != "" {
+			oc.Track(userID)
+		}
 		_, _ = fmt.Fprintf(w, "Hello from %s\n", backendName)
 	})
 
 	// WebSocket handler
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		if userID := r.Header.Get("X-User-ID"); userID != "" {
+			oc.Track(userID)
+		}
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			slog.Error("websocket upgrade failed", "backend", backendName, "error", err)
@@ -106,6 +123,9 @@ func main() {
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-quit
 	slog.Info("received signal, shutting down backend", "signal", sig.String(), "backend", backendName)
+
+	// Stop ownership checker.
+	oc.Stop()
 
 	// Deregister from Redis so the proxy stops sending new requests.
 	if err := rdb.SRem(ctx, "backends:active", backendAddr).Err(); err != nil {

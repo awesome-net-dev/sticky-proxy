@@ -107,6 +107,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("cache hit", "userId", stickyKey, "backend", backend)
 	}
 
+	r.Header.Set("X-User-ID", stickyKey)
+
 	if isWS {
 		proxyWebSocket(w, r, backend)
 		return
