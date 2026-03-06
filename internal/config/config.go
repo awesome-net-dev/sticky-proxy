@@ -45,6 +45,9 @@ type Config struct {
 	AssignmentStore           string
 	HoldDuringTransition      bool
 	HoldTimeout               time.Duration
+	PoisonPillAction          string
+	PoisonPillThreshold       int
+	PoisonPillWindow          time.Duration
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -277,6 +280,26 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid HOLD_TIMEOUT: %w", err)
 	}
 	cfg.HoldTimeout = holdTimeout
+
+	// POISON_PILL_ACTION — default "" (disabled), options: "quarantine"
+	cfg.PoisonPillAction = os.Getenv("POISON_PILL_ACTION")
+	if cfg.PoisonPillAction != "" && cfg.PoisonPillAction != "quarantine" {
+		return nil, fmt.Errorf("invalid POISON_PILL_ACTION %q: must be \"\" or \"quarantine\"", cfg.PoisonPillAction)
+	}
+
+	// POISON_PILL_THRESHOLD — default 3
+	ppThreshold, err := parseInt("POISON_PILL_THRESHOLD", 3)
+	if err != nil {
+		return nil, fmt.Errorf("invalid POISON_PILL_THRESHOLD: %w", err)
+	}
+	cfg.PoisonPillThreshold = ppThreshold
+
+	// POISON_PILL_WINDOW — default 5m
+	ppWindow, err := parseDuration("POISON_PILL_WINDOW", 5*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("invalid POISON_PILL_WINDOW: %w", err)
+	}
+	cfg.PoisonPillWindow = ppWindow
 
 	// LOG_FORMAT — default "json", options: "json", "text"
 	cfg.LogFormat = envOrDefault("LOG_FORMAT", "json")

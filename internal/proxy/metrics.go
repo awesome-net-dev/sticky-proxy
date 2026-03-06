@@ -15,28 +15,33 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	totalRequests       uint64
-	backendErrors       uint64
-	redisFailures       uint64
-	redisCBFallbacks    uint64
-	cacheHitsLocal      uint64
-	cacheHitsRedis      uint64
-	cacheMisses         uint64
-	authFailures        uint64
-	wsConnections       uint64
-	rateLimited         uint64
-	hookAssigns         uint64
-	hookUnassigns       uint64
-	hookFailures        uint64
-	drainsTotal         uint64
-	drainUsersTotal     uint64
-	rebalanceTotal      uint64
-	rebalanceMovesTotal uint64
-	holdRequests        uint64
-	holdTimeouts        uint64
+	totalRequests        uint64
+	backendErrors        uint64
+	redisFailures        uint64
+	redisCBFallbacks     uint64
+	cacheHitsLocal       uint64
+	cacheHitsRedis       uint64
+	cacheMisses          uint64
+	authFailures         uint64
+	wsConnections        uint64
+	rateLimited          uint64
+	hookAssigns          uint64
+	hookUnassigns        uint64
+	hookFailures         uint64
+	drainsTotal          uint64
+	drainUsersTotal      uint64
+	rebalanceTotal       uint64
+	rebalanceMovesTotal  uint64
+	holdRequests         uint64
+	holdTimeouts         uint64
+	poisonPillDetections uint64
+	poisonPillBlocked    uint64
 )
 
-var drainingBackends int64
+var (
+	drainingBackends    int64
+	quarantinedAccounts int64
+)
 
 // Per-backend request counts: map[backendName] -> *uint64
 var backendRequests sync.Map
@@ -103,6 +108,18 @@ func IncHoldRequests() { atomic.AddUint64(&holdRequests, 1) }
 
 // IncHoldTimeouts increments stickyproxy_hold_timeouts_total.
 func IncHoldTimeouts() { atomic.AddUint64(&holdTimeouts, 1) }
+
+// IncPoisonPillDetections increments stickyproxy_poison_pill_detections_total.
+func IncPoisonPillDetections() { atomic.AddUint64(&poisonPillDetections, 1) }
+
+// IncPoisonPillBlocked increments stickyproxy_poison_pill_blocked_total.
+func IncPoisonPillBlocked() { atomic.AddUint64(&poisonPillBlocked, 1) }
+
+// IncQuarantinedAccounts increments stickyproxy_quarantined_accounts gauge.
+func IncQuarantinedAccounts() { atomic.AddInt64(&quarantinedAccounts, 1) }
+
+// DecQuarantinedAccounts decrements stickyproxy_quarantined_accounts gauge.
+func DecQuarantinedAccounts() { atomic.AddInt64(&quarantinedAccounts, -1) }
 
 // IncBackendRequests increments stickyproxy_backend_requests_total{backend="name"}.
 func IncBackendRequests(backend string) {
@@ -258,6 +275,14 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 		"Total held requests that exceeded the hold timeout",
 		atomic.LoadUint64(&holdTimeouts))
 
+	writeCounter(&b, "stickyproxy_poison_pill_detections_total",
+		"Total accounts quarantined by poison pill detection",
+		atomic.LoadUint64(&poisonPillDetections))
+
+	writeCounter(&b, "stickyproxy_poison_pill_blocked_total",
+		"Total requests blocked due to account quarantine",
+		atomic.LoadUint64(&poisonPillBlocked))
+
 	// per-backend request counts
 	b.WriteString("# HELP stickyproxy_backend_requests_total Total requests per backend\n")
 	b.WriteString("# TYPE stickyproxy_backend_requests_total counter\n")
@@ -285,6 +310,10 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	writeGauge(&b, "stickyproxy_draining_backends",
 		"Number of backends currently being drained",
 		atomic.LoadInt64(&drainingBackends))
+
+	writeGauge(&b, "stickyproxy_quarantined_accounts",
+		"Number of accounts currently quarantined by poison pill detection",
+		atomic.LoadInt64(&quarantinedAccounts))
 
 	// --- Histogram ---------------------------------------------------------
 

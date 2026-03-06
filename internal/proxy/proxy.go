@@ -35,8 +35,9 @@ type Proxy struct {
 	backendDiscovery BackendDiscoverer
 	HealthChecker    *HealthChecker
 	rateLimiter      *RateLimiter
-	notifier         CacheNotifier // optional, for cross-replica cache invalidation
-	holdMgr          *HoldManager  // optional, holds requests during assignment transitions
+	notifier         CacheNotifier       // optional, for cross-replica cache invalidation
+	holdMgr          *HoldManager        // optional, holds requests during assignment transitions
+	poisonPill       *PoisonPillDetector // optional, quarantines accounts that crash backends
 	closers          []io.Closer
 }
 
@@ -138,6 +139,11 @@ func New(cfg *config.Config) (*Proxy, error) {
 		backendDisc = k8sDisc
 	}
 
+	var poisonPill *PoisonPillDetector
+	if cfg.PoisonPillAction == "quarantine" {
+		poisonPill = NewPoisonPillDetector(cfg.PoisonPillThreshold, cfg.PoisonPillWindow)
+	}
+
 	slog.Info("proxy initialized", "assignment_store", cfg.AssignmentStore)
 
 	return &Proxy{
@@ -158,6 +164,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		rateLimiter:      NewRateLimiter(100, 200),
 		notifier:         notifier,
 		holdMgr:          holdMgr,
+		poisonPill:       poisonPill,
 		closers:          closers,
 	}, nil
 }
@@ -199,6 +206,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	stickyKey := jwtData.RoutingKey
 
+	// Block quarantined accounts (poison pill detection).
+	if p.poisonPill != nil && p.poisonPill.IsQuarantined(stickyKey) {
+		IncPoisonPillBlocked()
+		http.Error(w, "account quarantined", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Hold request if user is mid-transition (drain/rebalance in progress).
 	if p.holdMgr != nil {
 		p.holdMgr.Wait(ctx, stickyKey)
@@ -206,6 +220,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	backend, err := p.cache.Get(stickyKey)
 	if err == nil && (!p.backends.Available(backend) || (p.drain != nil && p.drain.IsDraining(backend))) {
+		// Track forced reassignment for poison pill detection.
+		if p.poisonPill != nil && p.poisonPill.RecordReassignment(stickyKey) {
+			IncPoisonPillBlocked()
+			http.Error(w, "account quarantined", http.StatusServiceUnavailable)
+			return
+		}
 		p.cache.Invalidate(stickyKey)
 		backend = ""
 		err = ErrCacheMiss
@@ -270,6 +290,9 @@ func (p *Proxy) Stop() {
 	}
 	for _, c := range p.closers {
 		_ = c.Close()
+	}
+	if p.poisonPill != nil {
+		p.poisonPill.Stop()
 	}
 	p.jwtCache.Stop()
 	p.cache.Stop()
