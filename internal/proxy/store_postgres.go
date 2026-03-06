@@ -230,6 +230,11 @@ func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// DB returns the underlying database pool, used by PostgresCacheNotifier.
+func (s *PostgresStore) DB() *sql.DB {
+	return s.db
+}
+
 func (s *PostgresStore) Close() error {
 	return s.db.Close()
 }

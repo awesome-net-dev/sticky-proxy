@@ -4,7 +4,8 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 
 ## Features
 
-- **Sticky sessions** — users are consistently routed to the same backend via Redis-backed mappings with local cache for fast repeated access
+- **Pluggable assignment store** — choose between Redis, PostgreSQL, or in-memory backend for assignment state; eliminates mandatory Redis dependency when PostgreSQL is already in the stack
+- **Sticky sessions** — users are consistently routed to the same backend via store-backed mappings with local cache for fast repeated access
 - **Configurable JWT routing** — extracts a configurable claim (default `sub`) from Bearer tokens with HMAC signature validation and token caching
 - **Two routing modes** — hash-based routing (default) or assignment-table routing with least-loaded backend selection
 - **Assign/unassign hooks** — batch-notifies backends when users are assigned or removed (`{"users": [...]}` payload), enabling stateful preloading and teardown
@@ -13,6 +14,7 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Rebalancing** — batch-redistributes users across backends on scale events using least-loaded or consistent-hash strategies, with pipelined Redis operations
 - **Backend auto-discovery** — DNS polling for headless services / Docker Compose, or event-driven Kubernetes EndpointSlice watch with proactive drain on pod termination
 - **WebSocket support** — full bidirectional proxying with sticky session persistence; connections are tracked per user and torn down on drain/rebalance so clients reconnect to new backends
+- **Cross-replica cache invalidation** — Redis Pub/Sub or PostgreSQL LISTEN/NOTIFY broadcasts backend invalidation events to all proxy replicas with debounced delivery, preventing stale local cache entries after drains, rebalances, or evictions
 - **Circuit breakers** — for both Redis and individual backends, with automatic CRC32 hash fallback when Redis is unavailable
 - **Active health checking** — periodic backend probes with configurable intervals; optional auto-drain on unhealthy
 - **Per-user rate limiting** — token bucket algorithm (100 tokens/sec, 200 burst) with automatic cleanup
@@ -66,11 +68,13 @@ graph TB
         DR[Drain Manager]
         DISC[Account Discovery]
         RB[Rebalancer]
+        CN[Cache Notifier]
         MET[Metrics Collector]
     end
 
     subgraph Storage
         Redis[(DragonflyDB / Redis)]
+        PG[(PostgreSQL)]
     end
 
     subgraph Backends
@@ -96,6 +100,8 @@ graph TB
     DR -->|orchestrate| HK
     DISC -->|reconcile accounts| RD
     RB -->|rebalance users| HK
+    CN <-->|pub/sub invalidation| Redis
+    CN <-->|LISTEN/NOTIFY| PG
 ```
 
 ### HTTP Request Flow (Hash Mode)
@@ -404,9 +410,16 @@ All settings are configured via environment variables. Only `JWT_SECRET` is requ
 | Variable | Default | Description |
 |---|---|---|
 | `ROUTING_CLAIM` | `sub` | JWT claim used as the routing key |
-| `ROUTING_MODE` | `hash` | Routing strategy: `hash` (CRC32-based) or `assignment` (Redis assignment table with least-loaded selection) |
+| `ROUTING_MODE` | `hash` | Routing strategy: `hash` (CRC32-based) or `assignment` (least-loaded selection via assignment table) |
+| `ASSIGNMENT_STORE` | *(auto)* | Assignment backend: `memory`, `redis`, or `postgres`. Defaults to `memory` for hash mode, `postgres` when `ACCOUNTS_DISCOVERY=postgres`, `redis` otherwise |
+| `POSTGRES_DSN` | *(empty)* | PostgreSQL connection string (required when `ASSIGNMENT_STORE=postgres` or `ACCOUNTS_DISCOVERY=postgres`) |
 
 > **Breaking change:** `ROUTING_CLAIM` defaults to `"sub"` (standard JWT claim). If your tokens use a different claim (e.g., `"userId"`), set `ROUTING_CLAIM=userId`.
+
+**Assignment store modes:**
+- `memory` — in-memory backend list only, no external dependencies. Only valid with `ROUTING_MODE=hash`.
+- `redis` — assignments, backend list, and cache invalidation via Redis. Full feature set.
+- `postgres` — assignments and backend list in PostgreSQL, cache invalidation via LISTEN/NOTIFY. Eliminates Redis as a dependency when PostgreSQL is already in the stack.
 
 ### Hooks
 
@@ -436,7 +449,6 @@ Single-user operations (e.g., first-request assignment) send a single-element ar
 | `ACCOUNTS_DISCOVERY` | *(empty)* | Discovery source: `redis`, `http`, or `postgres` (requires `ROUTING_MODE=assignment`) |
 | `ACCOUNTS_QUERY` | *(empty)* | Redis set key, HTTP URL, or SQL query for account discovery |
 | `ACCOUNTS_REFRESH_INTERVAL` | `30s` | How often to reconcile discovered accounts |
-| `POSTGRES_DSN` | *(empty)* | PostgreSQL connection string (required when `ACCOUNTS_DISCOVERY=postgres`) |
 
 When using `postgres` discovery, `ACCOUNTS_QUERY` should be a SQL query that returns a single text column of account IDs, e.g.:
 ```sql
@@ -528,12 +540,24 @@ Backends discovered via either method are still validated by the health checker 
 
 ## Redis Data Model
 
-| Key | Type | Description |
+| Key / Channel | Type | Description |
 |---|---|---|
 | `sticky:{routingKey}` | STRING | Maps a user to their assigned backend URL (hash mode) |
 | `backends:active` | SET | All currently healthy backend URLs |
 | `assignments` | HASH | routingKey -> JSON `{backend, assigned_at, source}` (assignment mode) |
 | `assignment:counts` | HASH | backend URL -> number of assigned users (assignment mode) |
+| `sticky-proxy:cache-invalidate` | PUB/SUB | Cross-replica cache invalidation; payload is the backend URL to invalidate |
+
+## PostgreSQL Data Model
+
+When `ASSIGNMENT_STORE=postgres`, the proxy auto-creates these tables on startup:
+
+| Table | Key Columns | Description |
+|---|---|---|
+| `backends` | `url` (PK), `healthy`, `discovered_at` | Backend registry. `RemoveBackend` sets `healthy=false` (soft delete). |
+| `assignments` | `routing_key` (PK), `backend`, `assigned_at`, `source` | User-to-backend assignments. Index on `backend` for efficient lookups. |
+
+Cache invalidation uses the `cache_invalidate` NOTIFY channel (payload: backend URL).
 
 ## Prometheus Metrics
 
@@ -583,7 +607,13 @@ internal/
     proxy.go          # HTTP handler and routing orchestrator
     backends.go       # backend manager with circuit breaker
     redis.go          # Redis client with circuit breaker
+    store.go          # Store and BackendList interfaces
+    store_redis.go    # Redis Store adapter
+    store_postgres.go # PostgreSQL Store implementation
+    store_memory.go   # in-memory backend list (hash mode)
     user_cache.go     # local in-memory sticky cache
+    cache_notifier.go          # CacheNotifier interface + Redis Pub/Sub impl
+    cache_notifier_postgres.go # PostgreSQL LISTEN/NOTIFY impl
     jwt.go            # JWT token extraction (configurable claim)
     jwt_cache.go      # JWT token caching
     health_checker.go # active backend health probes

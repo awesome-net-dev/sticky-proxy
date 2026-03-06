@@ -21,9 +21,10 @@ type BackendManager struct {
 	redis             *Redis // optional, for hash-mode sticky key invalidation
 	routingMode       string
 	hooks             *HookClient
+	notifier          CacheNotifier // optional, for cross-replica cache invalidation
 }
 
-func NewBackendManager(store Store, r *Redis, cache *UserCache, routingMode string, evictionThreshold int, evictionCooldown time.Duration, hooks *HookClient) *BackendManager {
+func NewBackendManager(store Store, r *Redis, cache *UserCache, routingMode string, evictionThreshold int, evictionCooldown time.Duration, hooks *HookClient, notifier CacheNotifier) *BackendManager {
 	return &BackendManager{
 		evictionThreshold: evictionThreshold,
 		evictionCooldown:  evictionCooldown,
@@ -32,6 +33,7 @@ func NewBackendManager(store Store, r *Redis, cache *UserCache, routingMode stri
 		redis:             r,
 		routingMode:       routingMode,
 		hooks:             hooks,
+		notifier:          notifier,
 		transport: &http.Transport{
 			MaxIdleConns:          1000,
 			MaxIdleConnsPerHost:   100,
@@ -134,6 +136,12 @@ func (b *BackendManager) invalidateStickyMappings(backend string) {
 
 	if b.cache != nil {
 		b.cache.InvalidateBackend(backend)
+	}
+
+	if b.notifier != nil {
+		if err := b.notifier.Publish(ctx, backend); err != nil {
+			slog.Error("cache notifier: publish failed", "backend", backend, "error", err)
+		}
 	}
 }
 

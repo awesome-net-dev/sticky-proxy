@@ -17,6 +17,7 @@ type DrainManager struct {
 	connTracker *ConnTracker
 	routingMode string
 	timeout     time.Duration
+	notifier    CacheNotifier // optional, for cross-replica cache invalidation
 
 	mu       sync.Mutex
 	draining map[string]context.CancelFunc
@@ -24,7 +25,7 @@ type DrainManager struct {
 
 // NewDrainManager creates a DrainManager.
 // The redis parameter is optional and only used for hash-mode sticky key operations.
-func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration) *DrainManager {
+func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration, notifier CacheNotifier) *DrainManager {
 	return &DrainManager{
 		store:       store,
 		redis:       r,
@@ -33,6 +34,7 @@ func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache,
 		connTracker: ct,
 		routingMode: routingMode,
 		timeout:     timeout,
+		notifier:    notifier,
 		draining:    make(map[string]context.CancelFunc),
 	}
 }
@@ -137,6 +139,12 @@ func (d *DrainManager) drain(ctx context.Context, backend string) {
 			}
 		}
 		AddDrainUsers(uint64(len(users)))
+	}
+
+	if d.notifier != nil {
+		if err := d.notifier.Publish(ctx, backend); err != nil {
+			slog.Error("cache notifier: publish failed", "backend", backend, "error", err)
+		}
 	}
 
 	if err := d.store.RemoveBackend(ctx, backend); err != nil {

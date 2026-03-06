@@ -35,6 +35,7 @@ type Proxy struct {
 	backendDiscovery BackendDiscoverer
 	HealthChecker    *HealthChecker
 	rateLimiter      *RateLimiter
+	notifier         CacheNotifier // optional, for cross-replica cache invalidation
 	closers          []io.Closer
 }
 
@@ -46,6 +47,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 
 	var r *Redis
 	var store Store
+	var notifier CacheNotifier
 	var closers []io.Closer
 
 	switch cfg.AssignmentStore {
@@ -57,6 +59,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 			return nil, pgErr
 		}
 		store = pgStore
+		notifier = NewPostgresCacheNotifier(cfg.PostgresDSN, pgStore.DB())
 		closers = append(closers, pgStore)
 	default: // "redis"
 		var err error
@@ -65,14 +68,15 @@ func New(cfg *config.Config) (*Proxy, error) {
 			return nil, err
 		}
 		store = NewRedisStore(r)
+		notifier = NewRedisCacheNotifier(r.client)
 	}
 
 	cache := NewUserCache(cfg.CacheTTL)
 	ct := NewConnTracker()
-	b := NewBackendManager(store, r, cache, cfg.RoutingMode, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks)
+	b := NewBackendManager(store, r, cache, cfg.RoutingMode, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks, notifier)
 	b.Start()
 
-	drain := NewDrainManager(store, r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout)
+	drain := NewDrainManager(store, r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout, notifier)
 
 	var discovery *AccountDiscovery
 	if cfg.AccountsDiscovery != "" {
@@ -102,7 +106,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		case "consistent-hash":
 			strategy = &ConsistentHashStrategy{}
 		}
-		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct)
+		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct, notifier)
 	}
 
 	hc := NewHealthChecker(store, r)
@@ -146,6 +150,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		backendDiscovery: backendDisc,
 		HealthChecker:    hc,
 		rateLimiter:      NewRateLimiter(100, 200),
+		notifier:         notifier,
 		closers:          closers,
 	}, nil
 }
@@ -237,6 +242,9 @@ func (p *Proxy) StartDiscovery(ctx context.Context) {
 	}
 	if p.backendDiscovery != nil {
 		go p.backendDiscovery.Start(ctx)
+	}
+	if p.notifier != nil {
+		go subscribeDebouncedNotifier(ctx, p.notifier, p.cache, 100*time.Millisecond)
 	}
 }
 

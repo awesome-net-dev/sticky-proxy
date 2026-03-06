@@ -26,17 +26,19 @@ type Rebalancer struct {
 	hooks       *HookClient
 	cache       *UserCache
 	connTracker *ConnTracker
+	notifier    CacheNotifier // optional, for cross-replica cache invalidation
 	rebalancing atomic.Bool
 }
 
 // NewRebalancer creates a Rebalancer with the given strategy.
-func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker) *Rebalancer {
+func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker, notifier CacheNotifier) *Rebalancer {
 	return &Rebalancer{
 		strategy:    strategy,
 		store:       store,
 		hooks:       hooks,
 		cache:       cache,
 		connTracker: ct,
+		notifier:    notifier,
 	}
 }
 
@@ -94,6 +96,19 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 		rb.cache.Invalidate(m.RoutingKey)
 		if rb.connTracker != nil {
 			rb.connTracker.CloseConns(m.RoutingKey)
+		}
+	}
+
+	// 3b. Notify other replicas to invalidate their caches for affected backends.
+	if rb.notifier != nil {
+		notified := make(map[string]struct{})
+		for _, m := range moves {
+			if _, ok := notified[m.FromBackend]; !ok {
+				notified[m.FromBackend] = struct{}{}
+				if err := rb.notifier.Publish(ctx, m.FromBackend); err != nil {
+					slog.Error("cache notifier: publish failed", "backend", m.FromBackend, "error", err)
+				}
+			}
 		}
 	}
 

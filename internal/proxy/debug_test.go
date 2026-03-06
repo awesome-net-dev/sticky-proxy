@@ -58,7 +58,7 @@ func TestDebugRoutingHandler_CacheMiss(t *testing.T) {
 	p := &Proxy{
 		cache:        cache,
 		jwtCache:     jwtCache,
-		backends:     NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil),
+		backends:     NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil, nil),
 		jwtSecret:    testSecretBytes,
 		routingClaim: "userId",
 		routingMode:  "hash",
