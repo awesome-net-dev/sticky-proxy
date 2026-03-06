@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,7 +20,7 @@ type BackendDiscoverer interface {
 }
 
 type Proxy struct {
-	redis            *Redis // nil when ASSIGNMENT_STORE=postgres
+	redis            *Redis // nil when ASSIGNMENT_STORE is memory or postgres
 	store            Store
 	cache            *UserCache
 	backends         *BackendManager
@@ -47,6 +49,8 @@ func New(cfg *config.Config) (*Proxy, error) {
 	var closers []io.Closer
 
 	switch cfg.AssignmentStore {
+	case "memory":
+		store = NewMemoryStore()
 	case "postgres":
 		pgStore, pgErr := NewPostgresStore(cfg.PostgresDSN)
 		if pgErr != nil {
@@ -194,7 +198,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p.routingMode == "assignment" {
 			backend, assignErr = p.assignViaTable(ctx, stickyKey)
 		} else {
-			backend, assignErr = p.redis.AssignBackend(ctx, stickyKey, p.backends.Hash(stickyKey))
+			backend, assignErr = p.assignViaHash(ctx, stickyKey)
 		}
 		if assignErr != nil {
 			IncCacheMisses()
@@ -279,6 +283,20 @@ func (p *Proxy) assignViaTable(ctx context.Context, routingKey string) (string, 
 		p.redis.recordCBSuccess()
 	}
 	return a.Backend, nil
+}
+
+// assignViaHash picks a backend using CRC32 hash over the active backend list.
+func (p *Proxy) assignViaHash(ctx context.Context, routingKey string) (string, error) {
+	backends, err := p.store.ActiveBackends(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(backends) == 0 {
+		return "", errors.New("no active backends")
+	}
+	sort.Strings(backends)
+	hash := p.backends.Hash(routingKey)
+	return backends[hash%uint32(len(backends))], nil
 }
 
 // isWebSocket returns true if the request is a WebSocket upgrade.

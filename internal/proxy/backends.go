@@ -124,6 +124,12 @@ func (b *BackendManager) invalidateStickyMappings(backend string) {
 		if err := b.redis.InvalidateBackend(ctx, backend); err != nil {
 			slog.Error("failed to invalidate redis mappings", "backend", backend, "error", err)
 		}
+	} else if b.hooks != nil && b.cache != nil {
+		// Hash mode without Redis: get affected users from local cache.
+		users := b.cache.UsersForBackend(backend)
+		if len(users) > 0 {
+			b.hooks.SendUnassign(ctx, backend, users)
+		}
 	}
 
 	if b.cache != nil {

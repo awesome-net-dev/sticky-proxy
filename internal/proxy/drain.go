@@ -103,6 +103,9 @@ func (d *DrainManager) drain(ctx context.Context, backend string) {
 		users, err = d.store.GetBackendUsers(ctx, backend)
 	} else if d.redis != nil {
 		users, err = d.redis.GetUsersForBackend(ctx, backend)
+	} else {
+		// Hash mode without Redis: get affected users from local cache.
+		users = d.cache.UsersForBackend(backend)
 	}
 	if err != nil {
 		slog.Error("drain: failed to get users", "backend", backend, "error", err)

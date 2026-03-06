@@ -55,6 +55,20 @@ func (c *UserCache) Invalidate(userID string) {
 	c.data.Delete(userID)
 }
 
+// UsersForBackend returns all routing keys whose cached backend matches
+// the given address. This is O(n) over the cache.
+func (c *UserCache) UsersForBackend(backend string) []string {
+	var users []string
+	c.data.Range(func(key, value any) bool {
+		entry := value.(*cacheEntry)
+		if entry.backend == backend && !entry.exp.Before(time.Now()) {
+			users = append(users, key.(string))
+		}
+		return true
+	})
+	return users
+}
+
 // InvalidateBackend scans all cached mappings and deletes every entry
 // whose backend matches the given address. This is O(n) over the cache
 // because sync.Map does not support lookup by value.

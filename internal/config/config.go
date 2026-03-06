@@ -220,18 +220,20 @@ func Load() (*Config, error) {
 	// BACKEND_DISCOVERY_PORT_NAME — named port to match in EndpointSlice (empty = first port)
 	cfg.BackendDiscoveryPortName = os.Getenv("BACKEND_DISCOVERY_PORT_NAME")
 
-	// ASSIGNMENT_STORE — default "redis", options: "redis", "postgres"
-	// Defaults to "postgres" when ACCOUNTS_DISCOVERY=postgres is set.
+	// ASSIGNMENT_STORE — options: "memory", "redis", "postgres"
+	// Defaults: "memory" for hash mode, "postgres" when ACCOUNTS_DISCOVERY=postgres, "redis" otherwise.
 	cfg.AssignmentStore = os.Getenv("ASSIGNMENT_STORE")
 	if cfg.AssignmentStore == "" {
 		if cfg.AccountsDiscovery == "postgres" {
 			cfg.AssignmentStore = "postgres"
+		} else if cfg.RoutingMode == "hash" {
+			cfg.AssignmentStore = "memory"
 		} else {
 			cfg.AssignmentStore = "redis"
 		}
 	}
-	if cfg.AssignmentStore != "redis" && cfg.AssignmentStore != "postgres" {
-		return nil, fmt.Errorf("invalid ASSIGNMENT_STORE %q: must be \"redis\" or \"postgres\"", cfg.AssignmentStore)
+	if cfg.AssignmentStore != "memory" && cfg.AssignmentStore != "redis" && cfg.AssignmentStore != "postgres" {
+		return nil, fmt.Errorf("invalid ASSIGNMENT_STORE %q: must be \"memory\", \"redis\", or \"postgres\"", cfg.AssignmentStore)
 	}
 
 	// Cross-field validation
@@ -250,13 +252,16 @@ func Load() (*Config, error) {
 	if cfg.RebalanceStrategy != "none" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("REBALANCE_STRATEGY requires ROUTING_MODE=assignment")
 	}
+	if cfg.AssignmentStore == "memory" && cfg.RoutingMode != "hash" {
+		return nil, fmt.Errorf("ASSIGNMENT_STORE=memory requires ROUTING_MODE=hash")
+	}
 	if cfg.AssignmentStore == "postgres" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("ASSIGNMENT_STORE=postgres requires ROUTING_MODE=assignment")
 	}
 	if cfg.AssignmentStore == "postgres" && cfg.PostgresDSN == "" {
 		return nil, fmt.Errorf("ASSIGNMENT_STORE=postgres requires POSTGRES_DSN")
 	}
-	if cfg.AssignmentStore == "postgres" && cfg.AccountsDiscovery == "redis" {
+	if cfg.AccountsDiscovery == "redis" && cfg.AssignmentStore != "redis" {
 		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY=redis requires ASSIGNMENT_STORE=redis")
 	}
 
