@@ -27,6 +27,7 @@ type Proxy struct {
 	routingMode      string
 	hooks            *HookClient
 	drain            *DrainManager
+	connTracker      *ConnTracker
 	discovery        *AccountDiscovery
 	backendDiscovery BackendDiscoverer
 	HealthChecker    *HealthChecker
@@ -46,10 +47,11 @@ func New(cfg *config.Config) (*Proxy, error) {
 	}
 
 	cache := NewUserCache(cfg.CacheTTL)
+	ct := NewConnTracker()
 	b := NewBackendManager(r, cache, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks)
 	b.Start()
 
-	drain := NewDrainManager(r, hooks, cache, cfg.RoutingMode, cfg.DrainTimeout, cfg.DrainMaxConcurrent)
+	drain := NewDrainManager(r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout, cfg.DrainMaxConcurrent)
 
 	var discovery *AccountDiscovery
 	var closers []io.Closer
@@ -80,7 +82,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		case "consistent-hash":
 			strategy = &ConsistentHashStrategy{}
 		}
-		rebalancer = NewRebalancer(strategy, cfg.RebalanceMaxConcurrent, r, hooks, cache)
+		rebalancer = NewRebalancer(strategy, cfg.RebalanceMaxConcurrent, r, hooks, cache, ct)
 	}
 
 	hc := NewHealthChecker(r)
@@ -118,6 +120,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		routingMode:      cfg.RoutingMode,
 		hooks:            hooks,
 		drain:            drain,
+		connTracker:      ct,
 		discovery:        discovery,
 		backendDiscovery: backendDisc,
 		HealthChecker:    hc,
@@ -197,7 +200,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Set("X-User-ID", stickyKey)
 
 	if isWS {
-		proxyWebSocket(w, r, backend)
+		proxyWebSocket(w, r, backend, stickyKey, p.connTracker)
 		return
 	}
 

@@ -13,6 +13,7 @@ type DrainManager struct {
 	redis         *Redis
 	hooks         *HookClient
 	cache         *UserCache
+	connTracker   *ConnTracker
 	routingMode   string
 	timeout       time.Duration
 	maxConcurrent int
@@ -22,11 +23,12 @@ type DrainManager struct {
 }
 
 // NewDrainManager creates a DrainManager.
-func NewDrainManager(r *Redis, hooks *HookClient, cache *UserCache, routingMode string, timeout time.Duration, maxConcurrent int) *DrainManager {
+func NewDrainManager(r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration, maxConcurrent int) *DrainManager {
 	return &DrainManager{
 		redis:         r,
 		hooks:         hooks,
 		cache:         cache,
+		connTracker:   ct,
 		routingMode:   routingMode,
 		timeout:       timeout,
 		maxConcurrent: maxConcurrent,
@@ -128,6 +130,9 @@ func (d *DrainManager) drain(ctx context.Context, backend string) {
 				d.redis.client.Del(ctx, "sticky:"+u)
 			}
 			d.cache.Invalidate(u)
+			if d.connTracker != nil {
+				d.connTracker.CloseConns(u)
+			}
 			IncDrainUsers()
 		}(user)
 	}

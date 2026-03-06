@@ -24,7 +24,9 @@ var wsDialer = &websocket.Dialer{
 
 // proxyWebSocket upgrades the client connection and dials the backend,
 // then relays messages bidirectionally until either side closes.
-func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend string) {
+// If a ConnTracker is provided, the client connection is registered so
+// that drain/rebalance can close it to force a reconnect to the new backend.
+func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend, routingKey string, ct *ConnTracker) {
 	backendURL, err := url.Parse(backend)
 	if err != nil {
 		http.Error(w, "bad backend address", http.StatusBadGateway)
@@ -71,6 +73,11 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend string) {
 		return
 	}
 	defer func() { _ = clientConn.Close() }()
+
+	if ct != nil {
+		ct.Add(routingKey, clientConn)
+		defer ct.Remove(routingKey, clientConn)
+	}
 
 	// Use a single channel to detect when one direction finishes.
 	done := make(chan struct{}, 1)

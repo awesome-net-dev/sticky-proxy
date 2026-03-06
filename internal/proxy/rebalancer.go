@@ -27,17 +27,19 @@ type Rebalancer struct {
 	redis         *Redis
 	hooks         *HookClient
 	cache         *UserCache
+	connTracker   *ConnTracker
 	rebalancing   atomic.Bool
 }
 
 // NewRebalancer creates a Rebalancer with the given strategy.
-func NewRebalancer(strategy RebalanceStrategy, maxConcurrent int, r *Redis, hooks *HookClient, cache *UserCache) *Rebalancer {
+func NewRebalancer(strategy RebalanceStrategy, maxConcurrent int, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker) *Rebalancer {
 	return &Rebalancer{
 		strategy:      strategy,
 		maxConcurrent: maxConcurrent,
 		redis:         r,
 		hooks:         hooks,
 		cache:         cache,
+		connTracker:   ct,
 	}
 }
 
@@ -97,6 +99,9 @@ func (rb *Rebalancer) executeMove(ctx context.Context, m Move) {
 	// Delete old assignment.
 	_ = rb.redis.DeleteAssignment(ctx, m.RoutingKey)
 	rb.cache.Invalidate(m.RoutingKey)
+	if rb.connTracker != nil {
+		rb.connTracker.CloseConns(m.RoutingKey)
+	}
 
 	// Assign to new backend via the Lua script (will pick least-loaded).
 	a, err := rb.redis.AssignViaTable(ctx, m.RoutingKey)
