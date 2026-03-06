@@ -103,9 +103,7 @@ func (b *BackendManager) invalidateStickyMappings(backend string) {
 		if err != nil {
 			slog.Error("failed to get users for backend", "backend", backend, "error", err)
 		} else {
-			for _, user := range users {
-				b.hooks.SendUnassign(ctx, backend, user)
-			}
+			b.hooks.SendUnassign(ctx, backend, users)
 		}
 	}
 

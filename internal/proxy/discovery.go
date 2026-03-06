@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"time"
 )
 
@@ -70,24 +71,45 @@ func (d *AccountDiscovery) reconcile(ctx context.Context) {
 		return
 	}
 
-	var assigned int
+	var unassigned []string
 	for _, acct := range accounts {
-		if _, exists := current[acct]; exists {
-			continue
+		if _, exists := current[acct]; !exists {
+			unassigned = append(unassigned, acct)
 		}
-		// Assign via the assignment table Lua script (least-loaded).
-		a, err := d.redis.AssignViaTable(ctx, acct)
-		if err != nil || a == nil {
-			slog.Warn("discovery: failed to assign account", "account", acct, "error", err)
-			continue
-		}
-		if d.hooks != nil {
-			d.hooks.SendAssign(ctx, a.Backend, acct)
-		}
-		assigned++
+	}
+	if len(unassigned) == 0 {
+		return
 	}
 
-	if assigned > 0 {
-		slog.Info("discovery: pre-assigned accounts", "count", assigned)
+	backends, err := d.redis.ActiveBackends(ctx)
+	if err != nil || len(backends) == 0 {
+		slog.Error("discovery: no active backends for assignment", "error", err)
+		return
+	}
+	sort.Strings(backends)
+
+	// Round-robin across backends.
+	assignments := make(map[string]string, len(unassigned))
+	for i, acct := range unassigned {
+		assignments[acct] = backends[i%len(backends)]
+	}
+
+	assigned, err := d.redis.BulkAssign(ctx, assignments)
+	if err != nil {
+		slog.Error("discovery: bulk assign failed", "error", err)
+	}
+
+	if d.hooks != nil && len(assigned) > 0 {
+		byBackend := make(map[string][]string)
+		for routingKey, backend := range assigned {
+			byBackend[backend] = append(byBackend[backend], routingKey)
+		}
+		for backend, keys := range byBackend {
+			d.hooks.SendAssign(ctx, backend, keys)
+		}
+	}
+
+	if len(assigned) > 0 {
+		slog.Info("discovery: pre-assigned accounts", "count", len(assigned))
 	}
 }

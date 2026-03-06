@@ -81,9 +81,6 @@ func IncHookFailures() { atomic.AddUint64(&hookFailures, 1) }
 // IncDrains increments stickyproxy_drains_total.
 func IncDrains() { atomic.AddUint64(&drainsTotal, 1) }
 
-// IncDrainUsers increments stickyproxy_drain_users_total.
-func IncDrainUsers() { atomic.AddUint64(&drainUsersTotal, 1) }
-
 // IncDrainingBackends increments stickyproxy_draining_backends gauge.
 func IncDrainingBackends() { atomic.AddInt64(&drainingBackends, 1) }
 
@@ -93,8 +90,11 @@ func DecDrainingBackends() { atomic.AddInt64(&drainingBackends, -1) }
 // IncRebalances increments stickyproxy_rebalances_total.
 func IncRebalances() { atomic.AddUint64(&rebalanceTotal, 1) }
 
-// IncRebalanceMoves increments stickyproxy_rebalance_moves_total.
-func IncRebalanceMoves() { atomic.AddUint64(&rebalanceMovesTotal, 1) }
+// AddDrainUsers adds n to stickyproxy_drain_users_total.
+func AddDrainUsers(n uint64) { atomic.AddUint64(&drainUsersTotal, n) }
+
+// AddRebalanceMoves adds n to stickyproxy_rebalance_moves_total.
+func AddRebalanceMoves(n uint64) { atomic.AddUint64(&rebalanceMovesTotal, n) }
 
 // IncBackendRequests increments stickyproxy_backend_requests_total{backend="name"}.
 func IncBackendRequests(backend string) {

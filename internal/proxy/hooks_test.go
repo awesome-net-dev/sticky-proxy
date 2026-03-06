@@ -24,8 +24,8 @@ func TestHookClient_SendAssign(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("failed to decode payload: %v", err)
 		}
-		if payload.User != "user-1" {
-			t.Errorf("expected user %q, got %q", "user-1", payload.User)
+		if len(payload.Users) != 1 || payload.Users[0] != "user-1" {
+			t.Errorf("expected users [user-1], got %v", payload.Users)
 		}
 		called.Add(1)
 		w.WriteHeader(http.StatusOK)
@@ -33,7 +33,7 @@ func TestHookClient_SendAssign(t *testing.T) {
 	defer srv.Close()
 
 	hc := NewHookClient(5*time.Second, 0)
-	hc.SendAssign(t.Context(), srv.URL, "user-1")
+	hc.SendAssign(t.Context(), srv.URL, []string{"user-1"})
 
 	if called.Load() != 1 {
 		t.Errorf("expected hook to be called once, got %d", called.Load())
@@ -54,7 +54,32 @@ func TestHookClient_SendUnassign(t *testing.T) {
 	defer srv.Close()
 
 	hc := NewHookClient(5*time.Second, 0)
-	hc.SendUnassign(t.Context(), srv.URL, "user-2")
+	hc.SendUnassign(t.Context(), srv.URL, []string{"user-2"})
+
+	if called.Load() != 1 {
+		t.Errorf("expected hook to be called once, got %d", called.Load())
+	}
+}
+
+func TestHookClient_SendAssignBatch(t *testing.T) {
+	t.Parallel()
+
+	var called atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload hookPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("failed to decode payload: %v", err)
+		}
+		if len(payload.Users) != 3 {
+			t.Errorf("expected 3 users, got %d", len(payload.Users))
+		}
+		called.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	hc := NewHookClient(5*time.Second, 0)
+	hc.SendAssign(t.Context(), srv.URL, []string{"user-1", "user-2", "user-3"})
 
 	if called.Load() != 1 {
 		t.Errorf("expected hook to be called once, got %d", called.Load())
@@ -76,7 +101,7 @@ func TestHookClient_RetryOnFailure(t *testing.T) {
 	defer srv.Close()
 
 	hc := NewHookClient(5*time.Second, 2) // 1 attempt + 2 retries = 3 total
-	hc.SendAssign(t.Context(), srv.URL, "user-retry")
+	hc.SendAssign(t.Context(), srv.URL, []string{"user-retry"})
 
 	if attempts.Load() != 3 {
 		t.Errorf("expected 3 attempts, got %d", attempts.Load())
@@ -95,7 +120,7 @@ func TestHookClient_TimeoutDoesNotBlock(t *testing.T) {
 	hc := NewHookClient(100*time.Millisecond, 0)
 
 	start := time.Now()
-	hc.SendAssign(t.Context(), srv.URL, "user-timeout")
+	hc.SendAssign(t.Context(), srv.URL, []string{"user-timeout"})
 	elapsed := time.Since(start)
 
 	if elapsed > 2*time.Second {

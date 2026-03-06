@@ -190,7 +190,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.cache.Set(stickyKey, backend)
 		slog.Debug("assigned backend via redis", "userId", stickyKey, "backend", backend, "mode", p.routingMode)
 		if p.hooks != nil {
-			go p.hooks.SendAssign(context.Background(), backend, stickyKey)
+			go p.hooks.SendAssign(context.Background(), backend, []string{stickyKey})
 		}
 	} else {
 		IncCacheHitsLocal()

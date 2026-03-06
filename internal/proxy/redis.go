@@ -341,3 +341,113 @@ func (r *Redis) GetBackendUsersFromTable(ctx context.Context, backend string) ([
 	}
 	return users, nil
 }
+
+// BulkAssign creates assignments for multiple routing keys using a pipeline.
+// Uses HSETNX to avoid overwriting live-traffic assignments.
+// Returns the map of actually-assigned routingKey -> backend.
+func (r *Redis) BulkAssign(ctx context.Context, assignments map[string]string) (map[string]string, error) {
+	if len(assignments) == 0 {
+		return nil, nil
+	}
+
+	now := time.Now().UTC()
+
+	// Phase 1: HSETNX all assignments.
+	pipe := r.client.Pipeline()
+	type pending struct {
+		key     string
+		backend string
+		cmd     *redis.BoolCmd
+	}
+	items := make([]pending, 0, len(assignments))
+	for routingKey, backend := range assignments {
+		val, err := json.Marshal(Assignment{Backend: backend, AssignedAt: now, Source: "assignment"})
+		if err != nil {
+			continue
+		}
+		cmd := pipe.HSetNX(ctx, "assignments", routingKey, string(val))
+		items = append(items, pending{routingKey, backend, cmd})
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, err
+	}
+
+	// Phase 2: Aggregate counts per backend for successful assignments.
+	assigned := make(map[string]string)
+	counts := make(map[string]int64)
+	for _, p := range items {
+		if p.cmd.Val() {
+			assigned[p.key] = p.backend
+			counts[p.backend]++
+		}
+	}
+
+	if len(counts) > 0 {
+		countPipe := r.client.Pipeline()
+		for backend, n := range counts {
+			countPipe.HIncrBy(ctx, "assignment:counts", backend, n)
+		}
+		if _, err := countPipe.Exec(ctx); err != nil {
+			return assigned, err
+		}
+	}
+
+	return assigned, nil
+}
+
+// BulkDeleteAssignments removes multiple assignments and decrements backend counts.
+func (r *Redis) BulkDeleteAssignments(ctx context.Context, routingKeys []string) error {
+	if len(routingKeys) == 0 {
+		return nil
+	}
+
+	// Phase 1: Get current assignments to know which backends to decrement.
+	pipe := r.client.Pipeline()
+	getCmds := make([]*redis.StringCmd, len(routingKeys))
+	for i, key := range routingKeys {
+		getCmds[i] = pipe.HGet(ctx, "assignments", key)
+	}
+	_, _ = pipe.Exec(ctx) // some keys may be redis.Nil
+
+	// Collect keys to delete and aggregate backend counts.
+	counts := make(map[string]int64)
+	toDelete := make([]string, 0, len(routingKeys))
+	for i, cmd := range getCmds {
+		val, err := cmd.Result()
+		if err != nil {
+			continue
+		}
+		a, err := unmarshalAssignment(val)
+		if err != nil {
+			continue
+		}
+		toDelete = append(toDelete, routingKeys[i])
+		counts[a.Backend]++
+	}
+
+	if len(toDelete) == 0 {
+		return nil
+	}
+
+	// Phase 2: Bulk delete + decrement counts.
+	delPipe := r.client.Pipeline()
+	delPipe.HDel(ctx, "assignments", toDelete...)
+	for backend, n := range counts {
+		delPipe.HIncrBy(ctx, "assignment:counts", backend, -n)
+	}
+	_, err := delPipe.Exec(ctx)
+	return err
+}
+
+// BulkDeleteSticky removes multiple sticky:{userId} keys via pipeline.
+func (r *Redis) BulkDeleteSticky(ctx context.Context, userIDs []string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	pipe := r.client.Pipeline()
+	for _, id := range userIDs {
+		pipe.Del(ctx, "sticky:"+id)
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}

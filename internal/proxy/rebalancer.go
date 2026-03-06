@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"sort"
-	"sync"
 	"sync/atomic"
 )
 
@@ -23,7 +22,7 @@ type RebalanceStrategy interface {
 // Rebalancer redistributes users across backends when the backend set changes.
 type Rebalancer struct {
 	strategy      RebalanceStrategy
-	maxConcurrent int
+	maxConcurrent int // Retained for API compatibility; batch operations do not use concurrency limits.
 	redis         *Redis
 	hooks         *HookClient
 	cache         *UserCache
@@ -56,6 +55,8 @@ func (rb *Rebalancer) Trigger(ctx context.Context, activeBackends []string) {
 }
 
 func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
+	sort.Strings(activeBackends)
+
 	assignments, err := rb.redis.GetAllAssignments(ctx)
 	if err != nil {
 		slog.Error("rebalancer: failed to get assignments", "error", err)
@@ -70,50 +71,76 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 	IncRebalances()
 	slog.Info("rebalancer: starting", "moves", len(moves))
 
-	sem := make(chan struct{}, rb.maxConcurrent)
-	var wg sync.WaitGroup
-
-	for _, m := range moves {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(move Move) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			rb.executeMove(ctx, move)
-		}(m)
-	}
-	wg.Wait()
-
-	slog.Info("rebalancer: completed", "moves", len(moves))
-}
-
-func (rb *Rebalancer) executeMove(ctx context.Context, m Move) {
-	// Unassign from old backend.
+	// 1. Group unassigns by FromBackend, send batch hooks.
 	if rb.hooks != nil {
-		rb.hooks.SendUnassign(ctx, m.FromBackend, m.RoutingKey)
+		byBackend := make(map[string][]string)
+		for _, m := range moves {
+			byBackend[m.FromBackend] = append(byBackend[m.FromBackend], m.RoutingKey)
+		}
+		for backend, keys := range byBackend {
+			rb.hooks.SendUnassign(ctx, backend, keys)
+		}
 	}
 
-	// Delete old assignment.
-	_ = rb.redis.DeleteAssignment(ctx, m.RoutingKey)
-	rb.cache.Invalidate(m.RoutingKey)
-	if rb.connTracker != nil {
-		rb.connTracker.CloseConns(m.RoutingKey)
+	// 2. Bulk delete old assignments.
+	routingKeys := make([]string, len(moves))
+	for i, m := range moves {
+		routingKeys[i] = m.RoutingKey
+	}
+	if err := rb.redis.BulkDeleteAssignments(ctx, routingKeys); err != nil {
+		slog.Error("rebalancer: bulk delete failed", "error", err)
 	}
 
-	// Assign to new backend via the Lua script (will pick least-loaded).
-	a, err := rb.redis.AssignViaTable(ctx, m.RoutingKey)
-	if err != nil || a == nil {
-		slog.Warn("rebalancer: failed to reassign", "user", m.RoutingKey, "error", err)
+	// 3. Invalidate cache + close WebSocket connections.
+	for _, m := range moves {
+		rb.cache.Invalidate(m.RoutingKey)
+		if rb.connTracker != nil {
+			rb.connTracker.CloseConns(m.RoutingKey)
+		}
+	}
+
+	// Bail out if context was cancelled during unassign/delete phase.
+	if ctx.Err() != nil {
+		slog.Warn("rebalancer: context cancelled after delete phase", "error", ctx.Err())
 		return
 	}
 
-	if rb.hooks != nil {
-		rb.hooks.SendAssign(ctx, a.Backend, m.RoutingKey)
+	// 4. Compute new assignments: use ToBackend if set (consistent-hash),
+	//    otherwise round-robin across active backends (least-loaded).
+	newAssignments := make(map[string]string, len(moves))
+	var unrouted []string
+	for _, m := range moves {
+		if m.ToBackend != "" {
+			newAssignments[m.RoutingKey] = m.ToBackend
+		} else {
+			unrouted = append(unrouted, m.RoutingKey)
+		}
 	}
-	IncRebalanceMoves()
+	if len(unrouted) > 0 && len(activeBackends) > 0 {
+		for i, key := range unrouted {
+			newAssignments[key] = activeBackends[i%len(activeBackends)]
+		}
+	}
+
+	// 5. Bulk assign new backends.
+	assigned, err := rb.redis.BulkAssign(ctx, newAssignments)
+	if err != nil {
+		slog.Error("rebalancer: bulk assign failed", "error", err)
+	}
+
+	// 6. Group assigns by backend, send batch hooks.
+	if rb.hooks != nil && len(assigned) > 0 {
+		byBackend := make(map[string][]string)
+		for routingKey, backend := range assigned {
+			byBackend[backend] = append(byBackend[backend], routingKey)
+		}
+		for backend, keys := range byBackend {
+			rb.hooks.SendAssign(ctx, backend, keys)
+		}
+	}
+
+	AddRebalanceMoves(uint64(len(assigned)))
+	slog.Info("rebalancer: completed", "moves", len(assigned))
 }
 
 // --- Strategies ---

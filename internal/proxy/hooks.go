@@ -17,7 +17,7 @@ type HookClient struct {
 }
 
 type hookPayload struct {
-	User string `json:"user"`
+	Users []string `json:"users"`
 }
 
 // NewHookClient creates a HookClient with the given timeout and retry count.
@@ -28,29 +28,28 @@ func NewHookClient(timeout time.Duration, retries int) *HookClient {
 	}
 }
 
-// SendAssign notifies a backend that a user has been assigned to it.
-func (h *HookClient) SendAssign(ctx context.Context, backend, routingKey string) {
-	if err := h.send(ctx, backend, "/hooks/assign", routingKey); err != nil {
+// SendAssign notifies a backend that users have been assigned to it.
+func (h *HookClient) SendAssign(ctx context.Context, backend string, routingKeys []string) {
+	if err := h.send(ctx, backend, "/hooks/assign", routingKeys); err != nil {
 		IncHookFailures()
-		slog.Warn("assign hook failed", "backend", backend, "user", routingKey, "error", err)
+		slog.Warn("assign hook failed", "backend", backend, "users", len(routingKeys), "error", err)
 		return
 	}
 	IncHookAssigns()
 }
 
-// SendUnassign notifies a backend that a user has been unassigned from it.
-// This call blocks until the backend responds or the context is cancelled.
-func (h *HookClient) SendUnassign(ctx context.Context, backend, routingKey string) {
-	if err := h.send(ctx, backend, "/hooks/unassign", routingKey); err != nil {
+// SendUnassign notifies a backend that users have been unassigned from it.
+func (h *HookClient) SendUnassign(ctx context.Context, backend string, routingKeys []string) {
+	if err := h.send(ctx, backend, "/hooks/unassign", routingKeys); err != nil {
 		IncHookFailures()
-		slog.Warn("unassign hook failed", "backend", backend, "user", routingKey, "error", err)
+		slog.Warn("unassign hook failed", "backend", backend, "users", len(routingKeys), "error", err)
 		return
 	}
 	IncHookUnassigns()
 }
 
-func (h *HookClient) send(ctx context.Context, backend, path, routingKey string) error {
-	body, err := json.Marshal(hookPayload{User: routingKey})
+func (h *HookClient) send(ctx context.Context, backend, path string, routingKeys []string) error {
+	body, err := json.Marshal(hookPayload{Users: routingKeys})
 	if err != nil {
 		return err
 	}

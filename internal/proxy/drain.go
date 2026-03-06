@@ -16,7 +16,7 @@ type DrainManager struct {
 	connTracker   *ConnTracker
 	routingMode   string
 	timeout       time.Duration
-	maxConcurrent int
+	maxConcurrent int // Retained for API compatibility; batch operations do not use concurrency limits.
 
 	mu       sync.Mutex
 	draining map[string]context.CancelFunc
@@ -108,35 +108,32 @@ func (d *DrainManager) drain(ctx context.Context, backend string) {
 		return
 	}
 
-	sem := make(chan struct{}, d.maxConcurrent)
-	var wg sync.WaitGroup
-
-	for _, user := range users {
-		if ctx.Err() != nil {
-			break
+	if len(users) > 0 {
+		// Batch unassign hook.
+		if d.hooks != nil {
+			d.hooks.SendUnassign(ctx, backend, users)
 		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(u string) {
-			defer wg.Done()
-			defer func() { <-sem }()
 
-			if d.hooks != nil {
-				d.hooks.SendUnassign(ctx, backend, u)
+		// Bulk delete from Redis.
+		if d.routingMode == "assignment" {
+			if delErr := d.redis.BulkDeleteAssignments(ctx, users); delErr != nil {
+				slog.Error("drain: bulk delete failed", "backend", backend, "error", delErr)
 			}
-			if d.routingMode == "assignment" {
-				_ = d.redis.DeleteAssignment(ctx, u)
-			} else {
-				d.redis.client.Del(ctx, "sticky:"+u)
+		} else {
+			if delErr := d.redis.BulkDeleteSticky(ctx, users); delErr != nil {
+				slog.Error("drain: bulk delete failed", "backend", backend, "error", delErr)
 			}
+		}
+
+		// Invalidate local cache + close WebSocket connections.
+		for _, u := range users {
 			d.cache.Invalidate(u)
 			if d.connTracker != nil {
 				d.connTracker.CloseConns(u)
 			}
-			IncDrainUsers()
-		}(user)
+		}
+		AddDrainUsers(uint64(len(users)))
 	}
-	wg.Wait()
 
 	if err := d.redis.RemoveBackend(ctx, backend); err != nil {
 		slog.Error("drain: failed to remove backend", "backend", backend, "error", err)
