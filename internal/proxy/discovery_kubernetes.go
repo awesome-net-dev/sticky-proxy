@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,7 +25,8 @@ import (
 type epState int
 
 const (
-	epActive      epState = iota // ready=true, terminating=false
+	epUnknown     epState = iota // zero value — uninitialised / not yet classified
+	epActive                     // ready=true, terminating=false
 	epTerminating                // serving=true, terminating=true
 )
 
@@ -83,7 +88,7 @@ func newKubernetesBackendDiscovery(
 	if namespace == "" {
 		ns, readErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 		if readErr == nil && len(ns) > 0 {
-			namespace = string(ns)
+			namespace = strings.TrimSpace(string(ns))
 		} else {
 			namespace = "default"
 		}
@@ -118,10 +123,20 @@ func (k *KubernetesBackendDiscovery) Start(ctx context.Context) {
 	)
 
 	informer := factory.Discovery().V1().EndpointSlices().Informer()
+
+	// Buffered channel coalesces rapid-fire events into a single reconcile.
+	reconcileCh := make(chan struct{}, 1)
+	enqueue := func() {
+		select {
+		case reconcileCh <- struct{}{}:
+		default:
+		}
+	}
+
 	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(_ interface{}) { k.reconcile(innerCtx, informer.GetStore()) },
-		UpdateFunc: func(_, _ interface{}) { k.reconcile(innerCtx, informer.GetStore()) },
-		DeleteFunc: func(_ interface{}) { k.reconcile(innerCtx, informer.GetStore()) },
+		AddFunc:    func(_ interface{}) { enqueue() },
+		UpdateFunc: func(_, _ interface{}) { enqueue() },
+		DeleteFunc: func(_ interface{}) { enqueue() },
 	})
 	if err != nil {
 		slog.Error("kubernetes discovery: failed to add event handler", "error", err)
@@ -143,6 +158,36 @@ func (k *KubernetesBackendDiscovery) Start(ctx context.Context) {
 		"selector", k.selector,
 		"portName", k.portName,
 	)
+
+	// Debounced reconcile loop: waits 500ms after the last event before
+	// reconciling, so bursts from rolling deploys collapse into one pass.
+	go func() {
+		for {
+			select {
+			case <-reconcileCh:
+				t := time.NewTimer(500 * time.Millisecond)
+				select {
+				case <-t.C:
+				case <-k.stopCh:
+					t.Stop()
+					return
+				case <-innerCtx.Done():
+					t.Stop()
+					return
+				}
+				// Drain any signal that arrived during the wait.
+				select {
+				case <-reconcileCh:
+				default:
+				}
+				k.reconcile(innerCtx, informer.GetStore())
+			case <-k.stopCh:
+				return
+			case <-innerCtx.Done():
+				return
+			}
+		}
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -188,7 +233,7 @@ func (k *KubernetesBackendDiscovery) buildDesiredState(slices []*discoveryv1.End
 			terminating := ep.Conditions.Terminating != nil && *ep.Conditions.Terminating
 
 			for _, addr := range ep.Addresses {
-				url := fmt.Sprintf("http://%s:%d", addr, port)
+				url := "http://" + net.JoinHostPort(addr, strconv.Itoa(int(port)))
 
 				if ready && !terminating {
 					desired[url] = epActive
