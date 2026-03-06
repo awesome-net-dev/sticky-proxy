@@ -2,8 +2,13 @@ package proxy
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestLeastLoadedStrategy_ComputeMoves(t *testing.T) {
@@ -216,5 +221,170 @@ func TestRebalancer_PreservesWeightsInReassignment(t *testing.T) {
 				t.Errorf("light reassigned with weight %d, want 1", entry.Weight)
 			}
 		}
+	}
+}
+
+// forceMoveStrategy always moves user-1 from its current backend to the other.
+type forceMoveStrategy struct{}
+
+func (s *forceMoveStrategy) ComputeMoves(assignments map[string]*Assignment, activeBackends []string) []Move {
+	a, ok := assignments["user-1"]
+	if !ok || len(activeBackends) < 2 {
+		return nil
+	}
+	target := activeBackends[0]
+	if target == a.Backend {
+		target = activeBackends[1]
+	}
+	return []Move{{RoutingKey: "user-1", FromBackend: a.Backend, ToBackend: target}}
+}
+
+// rebalancerWSTestSetup creates a ConnTracker with a running WSBridge
+// (client <-> echoBackend1) and a fakeStore. echoBackend2 is the swap target.
+func rebalancerWSTestSetup(t *testing.T) (
+	store *fakeStore, ct *ConnTracker,
+	client *websocket.Conn, echoBackend2 *httptest.Server,
+) {
+	t.Helper()
+
+	echoBackend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		for {
+			mt, data, err := c.ReadMessage()
+			if err != nil {
+				break
+			}
+			_ = c.WriteMessage(mt, []byte("b1:"+string(data)))
+		}
+		_ = c.Close()
+	}))
+	t.Cleanup(echoBackend1.Close)
+
+	echoBackend2 = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		for {
+			mt, data, err := c.ReadMessage()
+			if err != nil {
+				break
+			}
+			_ = c.WriteMessage(mt, []byte("b2:"+string(data)))
+		}
+		_ = c.Close()
+	}))
+	t.Cleanup(echoBackend2.Close)
+
+	// Dial backend1 as the initial backend connection.
+	wsURL := "ws" + strings.TrimPrefix(echoBackend1.URL, "http")
+	backendConn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	// Set up a client pair through a bridge server.
+	bridgeCh := make(chan *WSBridge, 1)
+	bridgeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		serverSide, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		bridge := newWSBridge(serverSide, backendConn, "user-1", nil, "/", "")
+		bridgeCh <- bridge
+		bridge.run()
+	}))
+	t.Cleanup(bridgeSrv.Close)
+
+	clientURL := "ws" + strings.TrimPrefix(bridgeSrv.URL, "http")
+	client, resp2, err := websocket.DefaultDialer.Dial(clientURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp2.Body.Close()
+	t.Cleanup(func() { _ = client.Close() })
+
+	bridge := <-bridgeCh
+
+	// Verify the bridge works before handing it off.
+	if err := client.WriteMessage(websocket.TextMessage, []byte("init")); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := client.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "b1:init" {
+		t.Fatalf("setup: expected %q, got %q", "b1:init", string(data))
+	}
+
+	ct = NewConnTracker()
+	ct.Add("user-1", bridge)
+
+	// Store: only user-1 on b1 so the forced strategy always moves it.
+	store = newFakeStore([]string{echoBackend1.URL, echoBackend2.URL})
+	store.assignments["user-1"] = &Assignment{
+		Backend: echoBackend1.URL, Weight: 1,
+		Source: "assignment", AssignedAt: time.Now(),
+	}
+
+	return store, ct, client, echoBackend2
+}
+
+func TestRebalancer_WSSwapOnRebalanceTrue(t *testing.T) {
+	t.Parallel()
+
+	store, ct, client, _ := rebalancerWSTestSetup(t)
+
+	cache := NewUserCache(time.Minute)
+	t.Cleanup(cache.Stop)
+
+	rb := NewRebalancer(&forceMoveStrategy{}, store, nil, cache, ct, nil, nil, true)
+	rb.rebalance(context.Background(), store.backends)
+
+	// Give the swap time to dial the new backend.
+	time.Sleep(200 * time.Millisecond)
+
+	// Client connection should still be open and routed through b2.
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := client.WriteMessage(websocket.TextMessage, []byte("after")); err != nil {
+		t.Fatalf("write after swap: %v", err)
+	}
+	_, data, err := client.ReadMessage()
+	if err != nil {
+		t.Fatalf("read after swap: %v", err)
+	}
+	if got := string(data); got != "b2:after" {
+		t.Fatalf("expected %q, got %q", "b2:after", got)
+	}
+}
+
+func TestRebalancer_WSSwapOnRebalanceFalse(t *testing.T) {
+	t.Parallel()
+
+	store, ct, client, _ := rebalancerWSTestSetup(t)
+
+	cache := NewUserCache(time.Minute)
+	t.Cleanup(cache.Stop)
+
+	rb := NewRebalancer(&forceMoveStrategy{}, store, nil, cache, ct, nil, nil, false)
+	rb.rebalance(context.Background(), store.backends)
+
+	// Give the close time to propagate.
+	time.Sleep(200 * time.Millisecond)
+
+	// Client connection should be closed (GoingAway frame sent).
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := client.ReadMessage()
+	if err == nil {
+		t.Fatal("expected read error on closed connection, got nil")
 	}
 }
