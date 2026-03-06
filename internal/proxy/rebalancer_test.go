@@ -193,7 +193,7 @@ func TestRebalancer_PreservesWeightsInReassignment(t *testing.T) {
 	cache := NewUserCache(time.Minute)
 	t.Cleanup(cache.Stop)
 
-	rb := NewRebalancer(&LeastLoadedStrategy{}, store, nil, cache, nil, nil, nil)
+	rb := NewRebalancer(&LeastLoadedStrategy{}, store, nil, cache, nil, nil, nil, true)
 	rb.rebalance(context.Background(), []string{"b1", "b2"})
 
 	store.mu.Lock()

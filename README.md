@@ -16,7 +16,7 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Request holding during transitions** — optionally holds in-flight requests during drain/rebalance instead of returning errors, making reassignment invisible to clients
 - **Poison pill detection** — tracks reassignment frequency per account; quarantines accounts that repeatedly crash backends, preventing cascade failures across the cluster
 - **Backend auto-discovery** — DNS polling for headless services / Docker Compose, or event-driven Kubernetes EndpointSlice watch with proactive drain on pod termination
-- **WebSocket support** — full bidirectional proxying with sticky session persistence; connections are tracked per user and torn down on drain/rebalance so clients reconnect to new backends
+- **WebSocket support** — full bidirectional proxying with sticky session persistence; connections are tracked per user and transparently swapped to new backends during rebalance (client connection stays open), or torn down on drain so clients reconnect
 - **Cross-replica cache invalidation** — Redis Pub/Sub or PostgreSQL LISTEN/NOTIFY broadcasts backend invalidation events to all proxy replicas with debounced delivery, preventing stale local cache entries after drains, rebalances, or evictions
 - **Circuit breakers** — for both Redis and individual backends, with automatic CRC32 hash fallback when Redis is unavailable
 - **Active health checking** — periodic backend probes with configurable intervals; optional auto-drain on unhealthy
@@ -229,29 +229,41 @@ sequenceDiagram
 sequenceDiagram
     participant C as Client
     participant P as Proxy
-    participant B as Backend
+    participant B1 as Backend 1
+    participant B2 as Backend 2
 
     C->>P: HTTP Upgrade: websocket + JWT
     Note over P: Auth + sticky lookup<br/>(same as HTTP flow)
-    P->>B: Dial ws:// backend
-    B-->>P: 101 Switching Protocols
+    P->>B1: Dial ws:// backend1
+    B1-->>P: 101 Switching Protocols
     P-->>C: 101 Switching Protocols
 
     par Bidirectional relay
-        loop Client -> Backend
+        loop Client <-> Backend 1
             C->>P: WS message
-            P->>B: WS message
-        end
-    and
-        loop Backend -> Client
-            B->>P: WS message
+            P->>B1: WS message
+            B1->>P: WS message
             P->>C: WS message
         end
     end
 
-    alt Either side closes
-        C->>P: Close frame
-        P->>B: Close frame
+    alt Rebalance (WS_SWAP_ON_REBALANCE=true, default)
+        Note over P: Rebalancer triggers SwapBackend
+        P->>B1: Close backend connection
+        P->>B2: Dial ws:// backend2
+        B2-->>P: 101 Switching Protocols
+        Note over P: Forward queued client messages
+        Note over C: Client connection stays open
+        loop Client <-> Backend 2
+            C->>P: WS message
+            P->>B2: WS message
+        end
+    end
+
+    alt Rebalance (WS_SWAP_ON_REBALANCE=false) or Drain
+        Note over P: Close with GoingAway frame
+        P->>C: Close frame (1001 Going Away)
+        Note over C: Client reconnects<br/>and gets new backend
     end
 ```
 
@@ -540,6 +552,7 @@ When an account repeatedly crashes backends (causing forced reassignments), it i
 |---|---|---|
 | `REBALANCE_STRATEGY` | `none` | Strategy: `none`, `least-loaded`, or `consistent-hash` (requires `ROUTING_MODE=assignment`) |
 | `REBALANCE_ON_SCALE` | `false` | Trigger rebalance when the backend set changes |
+| `WS_SWAP_ON_REBALANCE` | `true` | Transparent WebSocket backend swap during rebalance. When `true` (default), the client connection stays open and only the backend connection is replaced. Set to `false` to close connections and let clients reconnect. |
 
 The `least-loaded` strategy considers total weight per backend (not just count) when accounts have weights assigned via discovery.
 

@@ -113,7 +113,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		case "consistent-hash":
 			strategy = &ConsistentHashStrategy{}
 		}
-		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct, notifier, holdMgr)
+		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct, notifier, holdMgr, cfg.WSSwapOnRebalance)
 	}
 
 	hc := NewHealthChecker(store, r)

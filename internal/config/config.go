@@ -45,6 +45,7 @@ type Config struct {
 	AssignmentStore           string
 	HoldDuringTransition      bool
 	HoldTimeout               time.Duration
+	WSSwapOnRebalance         bool
 	PoisonPillAction          string
 	PoisonPillThreshold       int
 	PoisonPillWindow          time.Duration
@@ -270,6 +271,9 @@ func Load() (*Config, error) {
 	if cfg.AccountsDiscovery == "redis" && cfg.AssignmentStore != "redis" {
 		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY=redis requires ASSIGNMENT_STORE=redis")
 	}
+
+	// WS_SWAP_ON_REBALANCE — default true (transparent backend swap; false = close + reconnect)
+	cfg.WSSwapOnRebalance = os.Getenv("WS_SWAP_ON_REBALANCE") != "false"
 
 	// HOLD_DURING_TRANSITION — default false
 	cfg.HoldDuringTransition = os.Getenv("HOLD_DURING_TRANSITION") == "true"

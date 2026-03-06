@@ -21,26 +21,28 @@ type RebalanceStrategy interface {
 
 // Rebalancer redistributes users across backends when the backend set changes.
 type Rebalancer struct {
-	strategy    RebalanceStrategy
-	store       Store
-	hooks       *HookClient
-	cache       *UserCache
-	connTracker *ConnTracker
-	notifier    CacheNotifier // optional, for cross-replica cache invalidation
-	holdMgr     *HoldManager  // optional, holds requests during transitions
-	rebalancing atomic.Bool
+	strategy          RebalanceStrategy
+	store             Store
+	hooks             *HookClient
+	cache             *UserCache
+	connTracker       *ConnTracker
+	notifier          CacheNotifier // optional, for cross-replica cache invalidation
+	holdMgr           *HoldManager  // optional, holds requests during transitions
+	wsSwapOnRebalance bool          // true = transparent swap; false = close + reconnect
+	rebalancing       atomic.Bool
 }
 
 // NewRebalancer creates a Rebalancer with the given strategy.
-func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker, notifier CacheNotifier, holdMgr *HoldManager) *Rebalancer {
+func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker, notifier CacheNotifier, holdMgr *HoldManager, wsSwap bool) *Rebalancer {
 	return &Rebalancer{
-		strategy:    strategy,
-		store:       store,
-		hooks:       hooks,
-		cache:       cache,
-		connTracker: ct,
-		notifier:    notifier,
-		holdMgr:     holdMgr,
+		strategy:          strategy,
+		store:             store,
+		hooks:             hooks,
+		cache:             cache,
+		connTracker:       ct,
+		notifier:          notifier,
+		holdMgr:           holdMgr,
+		wsSwapOnRebalance: wsSwap,
 	}
 }
 
@@ -103,12 +105,9 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 		slog.Error("rebalancer: bulk delete failed", "error", err)
 	}
 
-	// 3. Invalidate cache + close WebSocket connections.
+	// 3. Invalidate cache for moved users (WebSocket swap happens after new assignment).
 	for _, m := range moves {
 		rb.cache.Invalidate(m.RoutingKey)
-		if rb.connTracker != nil {
-			rb.connTracker.CloseConns(m.RoutingKey)
-		}
 	}
 
 	// 3b. Notify other replicas to invalidate their caches for affected backends.
@@ -167,6 +166,17 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 		}
 		for backend, keys := range byBackend {
 			rb.hooks.SendAssign(ctx, backend, keys)
+		}
+	}
+
+	// 7. Handle active WebSocket connections for moved users.
+	if rb.connTracker != nil {
+		for _, m := range moves {
+			if newBackend, ok := assigned[m.RoutingKey]; ok && rb.wsSwapOnRebalance {
+				rb.connTracker.SwapConns(m.RoutingKey, newBackend)
+			} else {
+				rb.connTracker.CloseConns(m.RoutingKey)
+			}
 		}
 	}
 

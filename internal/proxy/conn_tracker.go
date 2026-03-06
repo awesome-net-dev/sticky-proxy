@@ -1,65 +1,70 @@
 package proxy
 
-import (
-	"sync"
-	"time"
+import "sync"
 
-	"github.com/gorilla/websocket"
-)
-
-// ConnTracker tracks active WebSocket connections by routing key.
-// When a user is drained or rebalanced, their connections are closed
-// so the client reconnects and gets routed to the new backend.
+// ConnTracker tracks active WebSocket bridges by routing key.
+// It supports both closing connections (for drain) and transparent
+// backend swaps (for rebalance).
 type ConnTracker struct {
 	mu    sync.Mutex
-	conns map[string]map[*websocket.Conn]struct{}
+	conns map[string]map[*WSBridge]struct{}
 }
 
 // NewConnTracker creates an empty connection tracker.
 func NewConnTracker() *ConnTracker {
 	return &ConnTracker{
-		conns: make(map[string]map[*websocket.Conn]struct{}),
+		conns: make(map[string]map[*WSBridge]struct{}),
 	}
 }
 
-// Add registers a WebSocket connection for the given routing key.
-func (ct *ConnTracker) Add(routingKey string, conn *websocket.Conn) {
+// Add registers a WebSocket bridge for the given routing key.
+func (ct *ConnTracker) Add(routingKey string, bridge *WSBridge) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 	if ct.conns[routingKey] == nil {
-		ct.conns[routingKey] = make(map[*websocket.Conn]struct{})
+		ct.conns[routingKey] = make(map[*WSBridge]struct{})
 	}
-	ct.conns[routingKey][conn] = struct{}{}
+	ct.conns[routingKey][bridge] = struct{}{}
 }
 
-// Remove unregisters a WebSocket connection for the given routing key.
-func (ct *ConnTracker) Remove(routingKey string, conn *websocket.Conn) {
+// Remove unregisters a WebSocket bridge for the given routing key.
+func (ct *ConnTracker) Remove(routingKey string, bridge *WSBridge) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 	if s := ct.conns[routingKey]; s != nil {
-		delete(s, conn)
+		delete(s, bridge)
 		if len(s) == 0 {
 			delete(ct.conns, routingKey)
 		}
 	}
 }
 
-// CloseConns sends a GoingAway close frame and closes all WebSocket
-// connections for the given routing key. The close frame tells clients
-// the backend was reassigned and they should reconnect.
+// CloseConns sends a GoingAway close frame and closes all client connections
+// for the given routing key. Used during drain when the backend is removed.
 func (ct *ConnTracker) CloseConns(routingKey string) {
 	ct.mu.Lock()
-	conns := ct.conns[routingKey]
+	bridges := ct.conns[routingKey]
 	delete(ct.conns, routingKey)
 	ct.mu.Unlock()
 
-	for conn := range conns {
-		_ = conn.WriteControl(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseGoingAway, "backend reassigned"),
-			time.Now().Add(5*time.Second),
-		)
-		_ = conn.Close()
+	for bridge := range bridges {
+		bridge.Close()
+	}
+}
+
+// SwapConns transparently swaps all WebSocket connections for the given
+// routing key to a new backend without closing the client connection.
+// Used during rebalance.
+func (ct *ConnTracker) SwapConns(routingKey string, newBackend string) {
+	ct.mu.Lock()
+	bridges := make([]*WSBridge, 0, len(ct.conns[routingKey]))
+	for bridge := range ct.conns[routingKey] {
+		bridges = append(bridges, bridge)
+	}
+	ct.mu.Unlock()
+
+	for _, bridge := range bridges {
+		bridge.SwapBackend(newBackend)
 	}
 }
 
