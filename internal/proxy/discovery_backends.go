@@ -10,25 +10,25 @@ import (
 )
 
 // BackendDiscovery periodically resolves a DNS hostname and reconciles the
-// resulting IPs against the backends:active set in Redis. This enables
-// auto-discovery of backend pods via Kubernetes headless services or Docker
-// Compose service names without requiring backends to self-register.
+// resulting IPs against the active backend set. This enables auto-discovery
+// of backend pods via Kubernetes headless services or Docker Compose service
+// names without requiring backends to self-register.
 type BackendDiscovery struct {
 	host     string
 	port     string
 	interval time.Duration
-	redis    *Redis
+	store    Store
 	stopCh   chan struct{}
 }
 
 // NewBackendDiscovery creates a BackendDiscovery that resolves the given host
 // and builds http://{ip}:{port} URLs for each resolved address.
-func NewBackendDiscovery(host, port string, interval time.Duration, r *Redis) *BackendDiscovery {
+func NewBackendDiscovery(host, port string, interval time.Duration, store Store) *BackendDiscovery {
 	return &BackendDiscovery{
 		host:     host,
 		port:     port,
 		interval: interval,
-		redis:    r,
+		store:    store,
 		stopCh:   make(chan struct{}),
 	}
 }
@@ -58,7 +58,7 @@ func (d *BackendDiscovery) Stop() {
 }
 
 func (d *BackendDiscovery) reconcile(ctx context.Context) {
-	if d.redis == nil {
+	if d.store == nil {
 		return
 	}
 
@@ -74,7 +74,7 @@ func (d *BackendDiscovery) reconcile(ctx context.Context) {
 		discovered[url] = struct{}{}
 	}
 
-	current, err := d.redis.ActiveBackends(ctx)
+	current, err := d.store.ActiveBackends(ctx)
 	if err != nil {
 		slog.Error("backend discovery: failed to fetch active backends", "error", err)
 		return
@@ -89,7 +89,7 @@ func (d *BackendDiscovery) reconcile(ctx context.Context) {
 	var added int
 	for url := range discovered {
 		if _, exists := currentSet[url]; !exists {
-			if err := d.redis.AddBackend(ctx, url); err != nil {
+			if err := d.store.AddBackend(ctx, url); err != nil {
 				slog.Error("backend discovery: failed to add backend", "backend", url, "error", err)
 				continue
 			}
@@ -101,7 +101,7 @@ func (d *BackendDiscovery) reconcile(ctx context.Context) {
 	var removed int
 	for _, url := range current {
 		if _, exists := discovered[url]; !exists {
-			if err := d.redis.RemoveBackend(ctx, url); err != nil {
+			if err := d.store.RemoveBackend(ctx, url); err != nil {
 				slog.Error("backend discovery: failed to remove backend", "backend", url, "error", err)
 				continue
 			}

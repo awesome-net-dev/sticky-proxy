@@ -9,7 +9,7 @@ import (
 
 func TestBackendManager_AvailableByDefault(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 
 	if !bm.Available("http://backend:8080") {
 		t.Fatal("new backend should be available by default")
@@ -18,7 +18,7 @@ func TestBackendManager_AvailableByDefault(t *testing.T) {
 
 func TestBackendManager_UnavailableAfterFailures(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 
 	backend := "http://failing-backend:8080"
 
@@ -34,7 +34,7 @@ func TestBackendManager_UnavailableAfterFailures(t *testing.T) {
 
 func TestBackendManager_StillAvailableBeforeThreshold(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 
 	backend := "http://partial-fail:8080"
 
@@ -52,7 +52,7 @@ func TestBackendManager_StillAvailableBeforeThreshold(t *testing.T) {
 
 func TestBackendManager_RecoveryAfterCooldown(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 
 	backend := "http://recover-backend:8080"
 
@@ -90,7 +90,7 @@ func TestBackendManager_ProxyRequest_Success(t *testing.T) {
 	}))
 	defer backendServer.Close()
 
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/test", nil)
 
@@ -106,7 +106,7 @@ func TestBackendManager_ProxyRequest_Success(t *testing.T) {
 
 func TestBackendManager_ProxyRequest_UnavailableBackend(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 
 	backend := "http://unavailable-backend:8080"
 
@@ -143,7 +143,7 @@ func TestBackendManager_ProxyRequest_BackendError(t *testing.T) {
 	}))
 	defer backendServer.Close()
 
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/test", nil)
 
@@ -157,7 +157,7 @@ func TestBackendManager_ProxyRequest_BackendError(t *testing.T) {
 
 func TestBackendManager_Hash(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 
 	h1 := bm.Hash("user-1")
 	h2 := bm.Hash("user-1")
@@ -173,7 +173,7 @@ func TestBackendManager_Hash(t *testing.T) {
 
 func TestBackendManager_MultipleBackendFailures(t *testing.T) {
 	t.Parallel()
-	bm := NewBackendManager(nil, nil, 3, time.Minute, nil)
+	bm := NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil)
 
 	backend1 := "http://backend-1:8080"
 	backend2 := "http://backend-2:8080"

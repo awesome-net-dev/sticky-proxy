@@ -10,7 +10,8 @@ import (
 // DrainManager handles graceful draining of backends by unassigning all users
 // before removing the backend from the active pool.
 type DrainManager struct {
-	redis       *Redis
+	store       Store
+	redis       *Redis // optional, for hash-mode sticky key operations
 	hooks       *HookClient
 	cache       *UserCache
 	connTracker *ConnTracker
@@ -22,8 +23,10 @@ type DrainManager struct {
 }
 
 // NewDrainManager creates a DrainManager.
-func NewDrainManager(r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration) *DrainManager {
+// The redis parameter is optional and only used for hash-mode sticky key operations.
+func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration) *DrainManager {
 	return &DrainManager{
+		store:       store,
 		redis:       r,
 		hooks:       hooks,
 		cache:       cache,
@@ -97,8 +100,8 @@ func (d *DrainManager) drain(ctx context.Context, backend string) {
 	var users []string
 	var err error
 	if d.routingMode == "assignment" {
-		users, err = d.redis.GetBackendUsersFromTable(ctx, backend)
-	} else {
+		users, err = d.store.GetBackendUsers(ctx, backend)
+	} else if d.redis != nil {
 		users, err = d.redis.GetUsersForBackend(ctx, backend)
 	}
 	if err != nil {
@@ -112,12 +115,12 @@ func (d *DrainManager) drain(ctx context.Context, backend string) {
 			d.hooks.SendUnassign(ctx, backend, users)
 		}
 
-		// Bulk delete from Redis.
+		// Bulk delete assignments/sticky keys.
 		if d.routingMode == "assignment" {
-			if delErr := d.redis.BulkDeleteAssignments(ctx, users); delErr != nil {
+			if delErr := d.store.BulkDeleteAssignments(ctx, users); delErr != nil {
 				slog.Error("drain: bulk delete failed", "backend", backend, "error", delErr)
 			}
-		} else {
+		} else if d.redis != nil {
 			if delErr := d.redis.BulkDeleteSticky(ctx, users); delErr != nil {
 				slog.Error("drain: bulk delete failed", "backend", backend, "error", delErr)
 			}
@@ -133,7 +136,7 @@ func (d *DrainManager) drain(ctx context.Context, backend string) {
 		AddDrainUsers(uint64(len(users)))
 	}
 
-	if err := d.redis.RemoveBackend(ctx, backend); err != nil {
+	if err := d.store.RemoveBackend(ctx, backend); err != nil {
 		slog.Error("drain: failed to remove backend", "backend", backend, "error", err)
 	}
 }

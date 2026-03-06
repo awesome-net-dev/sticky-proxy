@@ -22,7 +22,7 @@ type RebalanceStrategy interface {
 // Rebalancer redistributes users across backends when the backend set changes.
 type Rebalancer struct {
 	strategy    RebalanceStrategy
-	redis       *Redis
+	store       Store
 	hooks       *HookClient
 	cache       *UserCache
 	connTracker *ConnTracker
@@ -30,10 +30,10 @@ type Rebalancer struct {
 }
 
 // NewRebalancer creates a Rebalancer with the given strategy.
-func NewRebalancer(strategy RebalanceStrategy, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker) *Rebalancer {
+func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker) *Rebalancer {
 	return &Rebalancer{
 		strategy:    strategy,
-		redis:       r,
+		store:       store,
 		hooks:       hooks,
 		cache:       cache,
 		connTracker: ct,
@@ -55,7 +55,7 @@ func (rb *Rebalancer) Trigger(ctx context.Context, activeBackends []string) {
 func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 	sort.Strings(activeBackends)
 
-	assignments, err := rb.redis.GetAllAssignments(ctx)
+	assignments, err := rb.store.GetAllAssignments(ctx)
 	if err != nil {
 		slog.Error("rebalancer: failed to get assignments", "error", err)
 		return
@@ -85,7 +85,7 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 	for i, m := range moves {
 		routingKeys[i] = m.RoutingKey
 	}
-	if err := rb.redis.BulkDeleteAssignments(ctx, routingKeys); err != nil {
+	if err := rb.store.BulkDeleteAssignments(ctx, routingKeys); err != nil {
 		slog.Error("rebalancer: bulk delete failed", "error", err)
 	}
 
@@ -121,7 +121,7 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 	}
 
 	// 5. Bulk assign new backends.
-	assigned, err := rb.redis.BulkAssign(ctx, newAssignments)
+	assigned, err := rb.store.BulkAssign(ctx, newAssignments)
 	if err != nil {
 		slog.Error("rebalancer: bulk assign failed", "error", err)
 	}

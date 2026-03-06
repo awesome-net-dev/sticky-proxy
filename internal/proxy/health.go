@@ -6,10 +6,10 @@ import (
 	"net/http"
 )
 
-func (p *Proxy) Healthz(w http.ResponseWriter, _ *http.Request) {
-	if err := p.redis.Ping(); err != nil {
-		slog.Error("health check failed: redis down", "error", err)
-		http.Error(w, "redis down", http.StatusServiceUnavailable)
+func (p *Proxy) Healthz(w http.ResponseWriter, r *http.Request) {
+	if err := p.store.Ping(r.Context()); err != nil {
+		slog.Error("health check failed: store down", "error", err)
+		http.Error(w, "store down", http.StatusServiceUnavailable)
 		return
 	}
 

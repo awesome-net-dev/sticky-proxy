@@ -39,7 +39,7 @@ type KubernetesBackendDiscovery struct {
 	namespace string
 	selector  string
 	portName  string
-	redis     *Redis
+	store     Store
 	drain     *DrainManager
 
 	mu       sync.Mutex
@@ -53,7 +53,7 @@ type KubernetesBackendDiscovery struct {
 // config first, falling back to KUBECONFIG / ~/.kube/config for local dev.
 func NewKubernetesBackendDiscovery(
 	namespace, selector, portName string,
-	r *Redis,
+	store Store,
 	drain *DrainManager,
 ) (*KubernetesBackendDiscovery, error) {
 	config, err := rest.InClusterConfig()
@@ -74,7 +74,7 @@ func NewKubernetesBackendDiscovery(
 		return nil, fmt.Errorf("kubernetes discovery: unable to create clientset: %w", err)
 	}
 
-	return newKubernetesBackendDiscovery(cs, namespace, selector, portName, r, drain), nil
+	return newKubernetesBackendDiscovery(cs, namespace, selector, portName, store, drain), nil
 }
 
 // newKubernetesBackendDiscovery is the internal constructor that accepts a
@@ -82,7 +82,7 @@ func NewKubernetesBackendDiscovery(
 func newKubernetesBackendDiscovery(
 	cs kubernetes.Interface,
 	namespace, selector, portName string,
-	r *Redis,
+	store Store,
 	drain *DrainManager,
 ) *KubernetesBackendDiscovery {
 	if namespace == "" {
@@ -99,7 +99,7 @@ func newKubernetesBackendDiscovery(
 		namespace: namespace,
 		selector:  selector,
 		portName:  portName,
-		redis:     r,
+		store:     store,
 		drain:     drain,
 		known:     make(map[string]epState),
 		stopCh:    make(chan struct{}),
@@ -201,7 +201,7 @@ func (k *KubernetesBackendDiscovery) Stop() {
 }
 
 func (k *KubernetesBackendDiscovery) reconcile(ctx context.Context, store cache.Store) {
-	if k.redis == nil {
+	if k.store == nil {
 		return
 	}
 
@@ -272,7 +272,7 @@ func (k *KubernetesBackendDiscovery) applyDesiredState(ctx context.Context, desi
 				k.drain.CancelDrain(url)
 			}
 			if !existed || prevState != epActive {
-				if err := k.redis.AddBackend(ctx, url); err != nil {
+				if err := k.store.AddBackend(ctx, url); err != nil {
 					slog.Error("kubernetes discovery: failed to add backend",
 						"backend", url, "error", err)
 					continue
@@ -287,7 +287,7 @@ func (k *KubernetesBackendDiscovery) applyDesiredState(ctx context.Context, desi
 				if k.drain != nil {
 					k.drain.StartDrain(url)
 				} else {
-					if err := k.redis.RemoveBackend(ctx, url); err != nil {
+					if err := k.store.RemoveBackend(ctx, url); err != nil {
 						slog.Error("kubernetes discovery: failed to remove backend",
 							"backend", url, "error", err)
 					}
@@ -300,7 +300,7 @@ func (k *KubernetesBackendDiscovery) applyDesiredState(ctx context.Context, desi
 	// Backends that disappeared from the slice entirely.
 	for url := range prev {
 		if _, exists := desired[url]; !exists {
-			if err := k.redis.RemoveBackend(ctx, url); err != nil {
+			if err := k.store.RemoveBackend(ctx, url); err != nil {
 				slog.Error("kubernetes discovery: failed to remove backend",
 					"backend", url, "error", err)
 				continue

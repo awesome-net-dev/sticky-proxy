@@ -17,17 +17,17 @@ type AccountSource interface {
 type AccountDiscovery struct {
 	source   AccountSource
 	interval time.Duration
-	redis    *Redis
+	store    Store
 	hooks    *HookClient
 	stopCh   chan struct{}
 }
 
 // NewAccountDiscovery creates an AccountDiscovery.
-func NewAccountDiscovery(source AccountSource, interval time.Duration, r *Redis, hooks *HookClient) *AccountDiscovery {
+func NewAccountDiscovery(source AccountSource, interval time.Duration, store Store, hooks *HookClient) *AccountDiscovery {
 	return &AccountDiscovery{
 		source:   source,
 		interval: interval,
-		redis:    r,
+		store:    store,
 		hooks:    hooks,
 		stopCh:   make(chan struct{}),
 	}
@@ -65,7 +65,7 @@ func (d *AccountDiscovery) reconcile(ctx context.Context) {
 	}
 
 	// Get current assignments to find unassigned accounts.
-	current, err := d.redis.GetAllAssignments(ctx)
+	current, err := d.store.GetAllAssignments(ctx)
 	if err != nil {
 		slog.Error("discovery: failed to get assignments", "error", err)
 		return
@@ -81,7 +81,7 @@ func (d *AccountDiscovery) reconcile(ctx context.Context) {
 		return
 	}
 
-	backends, err := d.redis.ActiveBackends(ctx)
+	backends, err := d.store.ActiveBackends(ctx)
 	if err != nil || len(backends) == 0 {
 		slog.Error("discovery: no active backends for assignment", "error", err)
 		return
@@ -94,7 +94,7 @@ func (d *AccountDiscovery) reconcile(ctx context.Context) {
 		assignments[acct] = backends[i%len(backends)]
 	}
 
-	assigned, err := d.redis.BulkAssign(ctx, assignments)
+	assigned, err := d.store.BulkAssign(ctx, assignments)
 	if err != nil {
 		slog.Error("discovery: bulk assign failed", "error", err)
 	}

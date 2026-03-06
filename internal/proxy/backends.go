@@ -17,16 +17,20 @@ type BackendManager struct {
 	evictionCooldown  time.Duration
 	transport         *http.Transport
 	cache             *UserCache
-	redis             *Redis
+	store             Store
+	redis             *Redis // optional, for hash-mode sticky key invalidation
+	routingMode       string
 	hooks             *HookClient
 }
 
-func NewBackendManager(r *Redis, cache *UserCache, evictionThreshold int, evictionCooldown time.Duration, hooks *HookClient) *BackendManager {
+func NewBackendManager(store Store, r *Redis, cache *UserCache, routingMode string, evictionThreshold int, evictionCooldown time.Duration, hooks *HookClient) *BackendManager {
 	return &BackendManager{
 		evictionThreshold: evictionThreshold,
 		evictionCooldown:  evictionCooldown,
 		cache:             cache,
+		store:             store,
 		redis:             r,
+		routingMode:       routingMode,
 		hooks:             hooks,
 		transport: &http.Transport{
 			MaxIdleConns:          1000,
@@ -98,23 +102,32 @@ func (b *BackendManager) recordFailure(backend string) {
 func (b *BackendManager) invalidateStickyMappings(backend string) {
 	ctx := context.Background()
 
-	if b.hooks != nil && b.redis != nil {
+	if b.routingMode == "assignment" && b.store != nil {
+		users, err := b.store.GetBackendUsers(ctx, backend)
+		if err != nil {
+			slog.Error("failed to get users for backend", "backend", backend, "error", err)
+		} else if len(users) > 0 {
+			if b.hooks != nil {
+				b.hooks.SendUnassign(ctx, backend, users)
+			}
+			if delErr := b.store.BulkDeleteAssignments(ctx, users); delErr != nil {
+				slog.Error("failed to delete assignments", "backend", backend, "error", delErr)
+			}
+		}
+	} else if b.redis != nil {
 		users, err := b.redis.GetUsersForBackend(ctx, backend)
 		if err != nil {
 			slog.Error("failed to get users for backend", "backend", backend, "error", err)
-		} else {
+		} else if b.hooks != nil && len(users) > 0 {
 			b.hooks.SendUnassign(ctx, backend, users)
+		}
+		if err := b.redis.InvalidateBackend(ctx, backend); err != nil {
+			slog.Error("failed to invalidate redis mappings", "backend", backend, "error", err)
 		}
 	}
 
 	if b.cache != nil {
 		b.cache.InvalidateBackend(backend)
-	}
-
-	if b.redis != nil {
-		if err := b.redis.InvalidateBackend(ctx, backend); err != nil {
-			slog.Error("failed to invalidate redis mappings", "backend", backend, "error", err)
-		}
 	}
 }
 

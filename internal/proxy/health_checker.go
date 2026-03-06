@@ -11,9 +11,10 @@ import (
 )
 
 // HealthChecker actively probes backend /healthz endpoints and updates
-// the Redis backends:active set when backends become unhealthy or recover.
+// the backend store when backends become unhealthy or recover.
 type HealthChecker struct {
-	redis *Redis
+	store Store
+	redis *Redis // optional, for hash fallback cache refresh
 
 	interval           time.Duration
 	unhealthyThreshold int
@@ -39,9 +40,11 @@ type backendHealth struct {
 }
 
 // NewHealthChecker creates a HealthChecker with sensible defaults.
-func NewHealthChecker(r *Redis) *HealthChecker {
+// The redis parameter is optional and used only for hash fallback cache refresh.
+func NewHealthChecker(store Store, redis *Redis) *HealthChecker {
 	return &HealthChecker{
-		redis:              r,
+		store:              store,
+		redis:              redis,
 		interval:           10 * time.Second,
 		unhealthyThreshold: 3,
 		healthyThreshold:   1,
@@ -95,14 +98,16 @@ func (hc *HealthChecker) HealthyCount() int {
 // checkAll refreshes the backend list from Redis, probes each one, and
 // reconciles the Redis set based on the results.
 func (hc *HealthChecker) checkAll(ctx context.Context) {
-	backends, err := hc.redis.ActiveBackends(ctx)
+	backends, err := hc.store.ActiveBackends(ctx)
 	if err != nil {
-		slog.Error("health checker: failed to fetch backends from redis", "error", err)
+		slog.Error("health checker: failed to fetch backends", "error", err)
 		return
 	}
 
-	// Keep the Redis circuit-breaker fallback list warm.
-	hc.redis.RefreshBackendList(ctx)
+	// Keep the Redis circuit-breaker fallback list warm (when Redis is used).
+	if hc.redis != nil {
+		hc.redis.RefreshBackendList(ctx)
+	}
 
 	// Merge newly discovered backends into the state map.
 	hc.mu.Lock()
@@ -216,7 +221,7 @@ func (hc *HealthChecker) recordResult(ctx context.Context, backend string, succe
 			state.healthy = true
 			hc.mu.Unlock()
 			slog.Info("backend became healthy, adding to active set", "backend", backend)
-			if err := hc.redis.AddBackend(ctx, backend); err != nil {
+			if err := hc.store.AddBackend(ctx, backend); err != nil {
 				slog.Error("health checker: failed to add backend", "backend", backend, "error", err)
 			}
 			return
@@ -232,7 +237,7 @@ func (hc *HealthChecker) recordResult(ctx context.Context, backend string, succe
 			if hc.drainOnUnhealthy && hc.drain != nil {
 				hc.drain.StartDrain(backend)
 			} else {
-				if err := hc.redis.RemoveBackend(ctx, backend); err != nil {
+				if err := hc.store.RemoveBackend(ctx, backend); err != nil {
 					slog.Error("health checker: failed to remove backend", "backend", backend, "error", err)
 				}
 			}

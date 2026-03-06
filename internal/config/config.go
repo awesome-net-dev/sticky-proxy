@@ -42,6 +42,7 @@ type Config struct {
 	BackendDiscoveryNamespace string
 	BackendDiscoverySelector  string
 	BackendDiscoveryPortName  string
+	AssignmentStore           string
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -219,6 +220,20 @@ func Load() (*Config, error) {
 	// BACKEND_DISCOVERY_PORT_NAME — named port to match in EndpointSlice (empty = first port)
 	cfg.BackendDiscoveryPortName = os.Getenv("BACKEND_DISCOVERY_PORT_NAME")
 
+	// ASSIGNMENT_STORE — default "redis", options: "redis", "postgres"
+	// Defaults to "postgres" when ACCOUNTS_DISCOVERY=postgres is set.
+	cfg.AssignmentStore = os.Getenv("ASSIGNMENT_STORE")
+	if cfg.AssignmentStore == "" {
+		if cfg.AccountsDiscovery == "postgres" {
+			cfg.AssignmentStore = "postgres"
+		} else {
+			cfg.AssignmentStore = "redis"
+		}
+	}
+	if cfg.AssignmentStore != "redis" && cfg.AssignmentStore != "postgres" {
+		return nil, fmt.Errorf("invalid ASSIGNMENT_STORE %q: must be \"redis\" or \"postgres\"", cfg.AssignmentStore)
+	}
+
 	// Cross-field validation
 	if cfg.AccountsDiscovery != "" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY requires ROUTING_MODE=assignment")
@@ -234,6 +249,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.RebalanceStrategy != "none" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("REBALANCE_STRATEGY requires ROUTING_MODE=assignment")
+	}
+	if cfg.AssignmentStore == "postgres" && cfg.RoutingMode != "assignment" {
+		return nil, fmt.Errorf("ASSIGNMENT_STORE=postgres requires ROUTING_MODE=assignment")
+	}
+	if cfg.AssignmentStore == "postgres" && cfg.PostgresDSN == "" {
+		return nil, fmt.Errorf("ASSIGNMENT_STORE=postgres requires POSTGRES_DSN")
+	}
+	if cfg.AssignmentStore == "postgres" && cfg.AccountsDiscovery == "redis" {
+		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY=redis requires ASSIGNMENT_STORE=redis")
 	}
 
 	// LOG_FORMAT — default "json", options: "json", "text"

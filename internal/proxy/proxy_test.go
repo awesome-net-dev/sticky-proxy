@@ -19,7 +19,7 @@ func newTestProxy(t *testing.T) *Proxy {
 	p := &Proxy{
 		cache:        cache,
 		jwtCache:     jwtCache,
-		backends:     NewBackendManager(nil, nil, 3, time.Minute, nil),
+		backends:     NewBackendManager(nil, nil, nil, "hash", 3, time.Minute, nil),
 		jwtSecret:    testSecretBytes,
 		routingClaim: "userId",
 		rateLimiter:  rl,

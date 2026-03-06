@@ -30,16 +30,16 @@ func (p *Proxy) DebugRoutingHandler(w http.ResponseWriter, r *http.Request) {
 		resp.Backend = backend
 		resp.CacheLayer = "local"
 		resp.Source = "local_cache"
-	} else if p.redis != nil && p.routingMode == "assignment" {
-		// Check Redis assignment hash.
-		if a, err := p.redis.GetAssignment(r.Context(), user); err == nil {
+	} else if p.routingMode == "assignment" {
+		// Check assignment store.
+		if a, err := p.store.GetAssignment(r.Context(), user); err == nil {
 			resp.Backend = a.Backend
 			resp.AssignedAt = a.AssignedAt.Format(time.RFC3339)
 			resp.Source = a.Source
-			resp.CacheLayer = "redis"
+			resp.CacheLayer = "store"
 		}
 	} else if p.redis != nil {
-		// Hash mode: check sticky:{user} key.
+		// Hash mode: check sticky:{user} key (Redis only).
 		if val, err := p.redis.client.Get(r.Context(), "sticky:"+user).Result(); err == nil {
 			resp.Backend = val
 			resp.CacheLayer = "redis"

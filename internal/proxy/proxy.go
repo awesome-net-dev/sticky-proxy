@@ -18,7 +18,8 @@ type BackendDiscoverer interface {
 }
 
 type Proxy struct {
-	redis            *Redis
+	redis            *Redis // nil when ASSIGNMENT_STORE=postgres
+	store            Store
 	cache            *UserCache
 	backends         *BackendManager
 	jwtCache         *JWTCache
@@ -36,25 +37,40 @@ type Proxy struct {
 }
 
 func New(cfg *config.Config) (*Proxy, error) {
-	r, err := NewRedis(cfg.RedisAddr, cfg.RedisPoolSize, cfg.RedisMinIdleConns, cfg.RedisCBThreshold, cfg.RedisCBCooldown)
-	if err != nil {
-		return nil, err
-	}
-
 	var hooks *HookClient
 	if cfg.HooksEnabled {
 		hooks = NewHookClient(cfg.HooksTimeout, cfg.HooksRetries)
 	}
 
+	var r *Redis
+	var store Store
+	var closers []io.Closer
+
+	switch cfg.AssignmentStore {
+	case "postgres":
+		pgStore, pgErr := NewPostgresStore(cfg.PostgresDSN)
+		if pgErr != nil {
+			return nil, pgErr
+		}
+		store = pgStore
+		closers = append(closers, pgStore)
+	default: // "redis"
+		var err error
+		r, err = NewRedis(cfg.RedisAddr, cfg.RedisPoolSize, cfg.RedisMinIdleConns, cfg.RedisCBThreshold, cfg.RedisCBCooldown)
+		if err != nil {
+			return nil, err
+		}
+		store = NewRedisStore(r)
+	}
+
 	cache := NewUserCache(cfg.CacheTTL)
 	ct := NewConnTracker()
-	b := NewBackendManager(r, cache, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks)
+	b := NewBackendManager(store, r, cache, cfg.RoutingMode, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks)
 	b.Start()
 
-	drain := NewDrainManager(r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout)
+	drain := NewDrainManager(store, r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout)
 
 	var discovery *AccountDiscovery
-	var closers []io.Closer
 	if cfg.AccountsDiscovery != "" {
 		var source AccountSource
 		switch cfg.AccountsDiscovery {
@@ -70,7 +86,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 			source = pgSource
 			closers = append(closers, pgSource)
 		}
-		discovery = NewAccountDiscovery(source, cfg.AccountsRefreshInterval, r, hooks)
+		discovery = NewAccountDiscovery(source, cfg.AccountsRefreshInterval, store, hooks)
 	}
 
 	var rebalancer *Rebalancer
@@ -82,10 +98,10 @@ func New(cfg *config.Config) (*Proxy, error) {
 		case "consistent-hash":
 			strategy = &ConsistentHashStrategy{}
 		}
-		rebalancer = NewRebalancer(strategy, r, hooks, cache, ct)
+		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct)
 	}
 
-	hc := NewHealthChecker(r)
+	hc := NewHealthChecker(store, r)
 	hc.drain = drain
 	hc.drainOnUnhealthy = cfg.DrainOnUnhealthy
 	hc.rebalancer = rebalancer
@@ -94,13 +110,13 @@ func New(cfg *config.Config) (*Proxy, error) {
 	var backendDisc BackendDiscoverer
 	switch cfg.BackendDiscovery {
 	case "dns":
-		backendDisc = NewBackendDiscovery(cfg.BackendDiscoveryHost, cfg.BackendDiscoveryPort, cfg.BackendDiscoveryInterval, r)
+		backendDisc = NewBackendDiscovery(cfg.BackendDiscoveryHost, cfg.BackendDiscoveryPort, cfg.BackendDiscoveryInterval, store)
 	case "kubernetes":
 		k8sDisc, k8sErr := NewKubernetesBackendDiscovery(
 			cfg.BackendDiscoveryNamespace,
 			cfg.BackendDiscoverySelector,
 			cfg.BackendDiscoveryPortName,
-			r, drain,
+			store, drain,
 		)
 		if k8sErr != nil {
 			return nil, k8sErr
@@ -108,10 +124,11 @@ func New(cfg *config.Config) (*Proxy, error) {
 		backendDisc = k8sDisc
 	}
 
-	slog.Info("proxy initialized")
+	slog.Info("proxy initialized", "assignment_store", cfg.AssignmentStore)
 
 	return &Proxy{
 		redis:            r,
+		store:            store,
 		cache:            cache,
 		backends:         b,
 		jwtCache:         NewJWTCache(cfg.JWTCacheMaxSize),
@@ -188,7 +205,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		IncCacheHitsRedis()
 		p.cache.Set(stickyKey, backend)
-		slog.Debug("assigned backend via redis", "userId", stickyKey, "backend", backend, "mode", p.routingMode)
+		slog.Debug("assigned backend", "userId", stickyKey, "backend", backend, "mode", p.routingMode)
 		if p.hooks != nil {
 			go p.hooks.SendAssign(context.Background(), backend, []string{stickyKey})
 		}
@@ -234,9 +251,10 @@ func (p *Proxy) Stop() {
 	p.rateLimiter.Stop()
 }
 
-// assignViaTable uses the assignment-table routing mode (Redis hash).
+// assignViaTable uses the assignment-table routing mode.
 func (p *Proxy) assignViaTable(ctx context.Context, routingKey string) (string, error) {
-	if p.redis.isCBOpen() {
+	// Redis circuit breaker: try hash fallback if CB is open.
+	if p.redis != nil && p.redis.isCBOpen() {
 		IncRedisCBFallbacks()
 		fb := p.redis.hashFallback(p.backends.Hash(routingKey))
 		if fb != "" {
@@ -244,18 +262,22 @@ func (p *Proxy) assignViaTable(ctx context.Context, routingKey string) (string, 
 		}
 	}
 
-	a, err := p.redis.AssignViaTable(ctx, routingKey)
+	a, err := p.store.AssignLeastLoaded(ctx, routingKey)
 	if err != nil || a == nil {
-		p.redis.recordCBFailure()
-		IncRedisFailures()
-		fb := p.redis.hashFallback(p.backends.Hash(routingKey))
-		if fb != "" {
-			IncRedisCBFallbacks()
-			return fb, nil
+		if p.redis != nil {
+			p.redis.recordCBFailure()
+			IncRedisFailures()
+			fb := p.redis.hashFallback(p.backends.Hash(routingKey))
+			if fb != "" {
+				IncRedisCBFallbacks()
+				return fb, nil
+			}
 		}
 		return "", err
 	}
-	p.redis.recordCBSuccess()
+	if p.redis != nil {
+		p.redis.recordCBSuccess()
+	}
 	return a.Backend, nil
 }
 
