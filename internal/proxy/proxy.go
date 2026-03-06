@@ -51,7 +51,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 	b := NewBackendManager(r, cache, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks)
 	b.Start()
 
-	drain := NewDrainManager(r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout, cfg.DrainMaxConcurrent)
+	drain := NewDrainManager(r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout)
 
 	var discovery *AccountDiscovery
 	var closers []io.Closer
@@ -82,7 +82,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		case "consistent-hash":
 			strategy = &ConsistentHashStrategy{}
 		}
-		rebalancer = NewRebalancer(strategy, cfg.RebalanceMaxConcurrent, r, hooks, cache, ct)
+		rebalancer = NewRebalancer(strategy, r, hooks, cache, ct)
 	}
 
 	hc := NewHealthChecker(r)

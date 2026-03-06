@@ -27,7 +27,6 @@ type Config struct {
 	HooksTimeout              time.Duration
 	HooksRetries              int
 	DrainTimeout              time.Duration
-	DrainMaxConcurrent        int
 	DrainOnUnhealthy          bool
 	RoutingMode               string
 	AccountsDiscovery         string
@@ -36,7 +35,6 @@ type Config struct {
 	PostgresDSN               string
 	RebalanceStrategy         string
 	RebalanceOnScale          bool
-	RebalanceMaxConcurrent    int
 	BackendDiscovery          string
 	BackendDiscoveryHost      string
 	BackendDiscoveryPort      string
@@ -156,13 +154,6 @@ func Load() (*Config, error) {
 	}
 	cfg.DrainTimeout = drainTimeout
 
-	// DRAIN_MAX_CONCURRENT — default 10
-	drainMaxConcurrent, err := parseInt("DRAIN_MAX_CONCURRENT", 10)
-	if err != nil {
-		return nil, fmt.Errorf("invalid DRAIN_MAX_CONCURRENT: %w", err)
-	}
-	cfg.DrainMaxConcurrent = drainMaxConcurrent
-
 	// DRAIN_ON_UNHEALTHY — default false
 	cfg.DrainOnUnhealthy = os.Getenv("DRAIN_ON_UNHEALTHY") == "true"
 
@@ -199,13 +190,6 @@ func Load() (*Config, error) {
 
 	// REBALANCE_ON_SCALE — default false
 	cfg.RebalanceOnScale = os.Getenv("REBALANCE_ON_SCALE") == "true"
-
-	// REBALANCE_MAX_CONCURRENT — default 10
-	rebalanceMaxConcurrent, err := parseInt("REBALANCE_MAX_CONCURRENT", 10)
-	if err != nil {
-		return nil, fmt.Errorf("invalid REBALANCE_MAX_CONCURRENT: %w", err)
-	}
-	cfg.RebalanceMaxConcurrent = rebalanceMaxConcurrent
 
 	// BACKEND_DISCOVERY — default "" (disabled), options: "dns", "kubernetes"
 	cfg.BackendDiscovery = os.Getenv("BACKEND_DISCOVERY")

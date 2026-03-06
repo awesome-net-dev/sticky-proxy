@@ -10,29 +10,27 @@ import (
 // DrainManager handles graceful draining of backends by unassigning all users
 // before removing the backend from the active pool.
 type DrainManager struct {
-	redis         *Redis
-	hooks         *HookClient
-	cache         *UserCache
-	connTracker   *ConnTracker
-	routingMode   string
-	timeout       time.Duration
-	maxConcurrent int // Retained for API compatibility; batch operations do not use concurrency limits.
+	redis       *Redis
+	hooks       *HookClient
+	cache       *UserCache
+	connTracker *ConnTracker
+	routingMode string
+	timeout     time.Duration
 
 	mu       sync.Mutex
 	draining map[string]context.CancelFunc
 }
 
 // NewDrainManager creates a DrainManager.
-func NewDrainManager(r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration, maxConcurrent int) *DrainManager {
+func NewDrainManager(r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration) *DrainManager {
 	return &DrainManager{
-		redis:         r,
-		hooks:         hooks,
-		cache:         cache,
-		connTracker:   ct,
-		routingMode:   routingMode,
-		timeout:       timeout,
-		maxConcurrent: maxConcurrent,
-		draining:      make(map[string]context.CancelFunc),
+		redis:       r,
+		hooks:       hooks,
+		cache:       cache,
+		connTracker: ct,
+		routingMode: routingMode,
+		timeout:     timeout,
+		draining:    make(map[string]context.CancelFunc),
 	}
 }
 

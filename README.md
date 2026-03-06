@@ -7,12 +7,12 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Sticky sessions** — users are consistently routed to the same backend via Redis-backed mappings with local cache for fast repeated access
 - **Configurable JWT routing** — extracts a configurable claim (default `sub`) from Bearer tokens with HMAC signature validation and token caching
 - **Two routing modes** — hash-based routing (default) or assignment-table routing with least-loaded backend selection
-- **Assign/unassign hooks** — notifies backends when users are assigned or removed, enabling stateful preloading and teardown
-- **Graceful drain** — drains backends by unassigning all users with concurrent hook notifications before removal
-- **Account discovery** — pre-assigns accounts to backends from Redis sets, HTTP endpoints, or PostgreSQL queries, even when no client is connected
-- **Rebalancing** — redistributes users across backends on scale events using least-loaded or consistent-hash strategies
+- **Assign/unassign hooks** — batch-notifies backends when users are assigned or removed (`{"users": [...]}` payload), enabling stateful preloading and teardown
+- **Graceful drain** — drains backends with batch unassign hooks and bulk Redis pipeline deletes; tears down active WebSocket connections so clients reconnect to their new backend
+- **Account discovery** — bulk pre-assigns accounts to backends (round-robin) from Redis sets, HTTP endpoints, or PostgreSQL queries via Redis pipeline (HSETNX)
+- **Rebalancing** — batch-redistributes users across backends on scale events using least-loaded or consistent-hash strategies, with pipelined Redis operations
 - **Backend auto-discovery** — DNS polling for headless services / Docker Compose, or event-driven Kubernetes EndpointSlice watch with proactive drain on pod termination
-- **WebSocket support** — full bidirectional proxying with sticky session persistence
+- **WebSocket support** — full bidirectional proxying with sticky session persistence; connections are tracked per user and torn down on drain/rebalance so clients reconnect to new backends
 - **Circuit breakers** — for both Redis and individual backends, with automatic CRC32 hash fallback when Redis is unavailable
 - **Active health checking** — periodic backend probes with configurable intervals; optional auto-drain on unhealthy
 - **Per-user rate limiting** — token bucket algorithm (100 tokens/sec, 200 burst) with automatic cleanup
@@ -173,8 +173,8 @@ sequenceDiagram
         Note over R: Atomic least-loaded selection:<br/>1. Check existing assignment<br/>2. If none, find backend with lowest count<br/>3. HSET assignment + HINCRBY count
         R-->>P: backend URL + assignment metadata
         P->>LC: Cache assignment
-        P->>HK: SendAssign(backend, routingKey)
-        HK->>B: POST /hooks/assign {"user":"routingKey"}
+        P->>HK: SendAssign(backend, [routingKey])
+        HK->>B: POST /hooks/assign {"users":["routingKey"]}
     end
 
     P->>B: Forward request
@@ -200,15 +200,13 @@ sequenceDiagram
     DR->>R: Collect users assigned to backend1
     Note over DR: SCAN sticky:* or HSCAN assignments
 
-    par Semaphore-limited (max N concurrent)
-        DR->>HK: SendUnassign(backend1, user1)
-        HK->>B: POST /hooks/unassign {"user":"user1"}
-        DR->>R: Delete mapping for user1
-    and
-        DR->>HK: SendUnassign(backend1, user2)
-        HK->>B: POST /hooks/unassign {"user":"user2"}
-        DR->>R: Delete mapping for user2
-    end
+    DR->>HK: SendUnassign(backend1, [user1, user2, ...])
+    HK->>B: POST /hooks/unassign {"users":["user1","user2",...]}
+
+    DR->>R: Pipeline: HDEL assignments + HINCRBY counts (batch)
+    Note over DR: Or pipeline DEL sticky:* keys (hash mode)
+
+    Note over DR: Invalidate local cache +<br/>close tracked WebSocket connections
 
     DR->>R: SREM backends:active backend1
     Note over DR: Backend fully drained
@@ -419,15 +417,16 @@ All settings are configured via environment variables. Only `JWT_SECRET` is requ
 | `HOOKS_RETRIES` | `2` | Number of retries on hook delivery failure |
 
 When enabled, the proxy sends:
-- `POST {backend}/hooks/assign` with `{"user":"<routingKey>"}` when a user is assigned
-- `POST {backend}/hooks/unassign` with `{"user":"<routingKey>"}` when a user is removed
+- `POST {backend}/hooks/assign` with `{"users":["<routingKey>", ...]}` when users are assigned
+- `POST {backend}/hooks/unassign` with `{"users":["<routingKey>", ...]}` when users are removed
+
+Single-user operations (e.g., first-request assignment) send a single-element array. Batch operations (drain, rebalance, discovery) send all affected users in one request per backend.
 
 ### Drain
 
 | Variable | Default | Description |
 |---|---|---|
 | `DRAIN_TIMEOUT` | `60s` | Maximum duration for a drain operation |
-| `DRAIN_MAX_CONCURRENT` | `10` | Maximum concurrent unassign operations during drain |
 | `DRAIN_ON_UNHEALTHY` | `false` | Automatically drain backends that fail health checks (requires `HOOKS_ENABLED=true`) |
 
 ### Account Discovery
@@ -495,7 +494,6 @@ Backends discovered via either method are still validated by the health checker 
 |---|---|---|
 | `REBALANCE_STRATEGY` | `none` | Strategy: `none`, `least-loaded`, or `consistent-hash` (requires `ROUTING_MODE=assignment`) |
 | `REBALANCE_ON_SCALE` | `false` | Trigger rebalance when the backend set changes |
-| `REBALANCE_MAX_CONCURRENT` | `10` | Maximum concurrent moves during rebalance |
 
 ## Endpoints
 
@@ -525,8 +523,8 @@ Backends discovered via either method are still validated by the health checker 
 
 | Path | Method | Description |
 |---|---|---|
-| `/hooks/assign` | POST | Notification that a user has been assigned. Body: `{"user":"<routingKey>"}` |
-| `/hooks/unassign` | POST | Notification that a user has been removed. Body: `{"user":"<routingKey>"}` |
+| `/hooks/assign` | POST | Notification that users have been assigned. Body: `{"users":["<routingKey>", ...]}` |
+| `/hooks/unassign` | POST | Notification that users have been removed. Body: `{"users":["<routingKey>", ...]}` |
 
 ## Redis Data Model
 
@@ -593,8 +591,9 @@ internal/
     websocket.go      # WebSocket bidirectional relay
     metrics.go        # Prometheus metrics
     hashing.go        # CRC32-based user hashing
-    hooks.go          # assign/unassign webhook client
-    drain.go          # graceful backend drain manager
+    hooks.go          # assign/unassign webhook client (batch payloads)
+    drain.go          # graceful backend drain manager (batch operations)
+    conn_tracker.go   # WebSocket connection tracker for drain/rebalance teardown
     admin.go          # admin HTTP handlers (/admin/drain)
     debug.go          # debug HTTP handler (/debug/routing)
     assignment.go     # assignment table data types
@@ -606,7 +605,7 @@ internal/
     discovery_postgres.go  # PostgreSQL query account source
     discovery_backends.go     # DNS-based backend pod discovery
     discovery_kubernetes.go   # Kubernetes EndpointSlice backend discovery
-    rebalancer.go          # rebalancing strategies and executor
+    rebalancer.go          # rebalancing strategies and batch executor
 pkg/
   ownership/          # backend ownership checker (Redis MGET on sticky:* keys)
 k6/                   # load testing utilities

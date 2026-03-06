@@ -21,24 +21,22 @@ type RebalanceStrategy interface {
 
 // Rebalancer redistributes users across backends when the backend set changes.
 type Rebalancer struct {
-	strategy      RebalanceStrategy
-	maxConcurrent int // Retained for API compatibility; batch operations do not use concurrency limits.
-	redis         *Redis
-	hooks         *HookClient
-	cache         *UserCache
-	connTracker   *ConnTracker
-	rebalancing   atomic.Bool
+	strategy    RebalanceStrategy
+	redis       *Redis
+	hooks       *HookClient
+	cache       *UserCache
+	connTracker *ConnTracker
+	rebalancing atomic.Bool
 }
 
 // NewRebalancer creates a Rebalancer with the given strategy.
-func NewRebalancer(strategy RebalanceStrategy, maxConcurrent int, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker) *Rebalancer {
+func NewRebalancer(strategy RebalanceStrategy, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker) *Rebalancer {
 	return &Rebalancer{
-		strategy:      strategy,
-		maxConcurrent: maxConcurrent,
-		redis:         r,
-		hooks:         hooks,
-		cache:         cache,
-		connTracker:   ct,
+		strategy:    strategy,
+		redis:       r,
+		hooks:       hooks,
+		cache:       cache,
+		connTracker: ct,
 	}
 }
 
