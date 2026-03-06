@@ -37,10 +37,13 @@ type Config struct {
 	RebalanceStrategy        string
 	RebalanceOnScale         bool
 	RebalanceMaxConcurrent   int
-	BackendDiscovery         string
-	BackendDiscoveryHost     string
-	BackendDiscoveryPort     string
-	BackendDiscoveryInterval time.Duration
+	BackendDiscovery          string
+	BackendDiscoveryHost      string
+	BackendDiscoveryPort      string
+	BackendDiscoveryInterval  time.Duration
+	BackendDiscoveryNamespace string
+	BackendDiscoverySelector  string
+	BackendDiscoveryPortName  string
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -204,10 +207,10 @@ func Load() (*Config, error) {
 	}
 	cfg.RebalanceMaxConcurrent = rebalanceMaxConcurrent
 
-	// BACKEND_DISCOVERY — default "" (disabled), options: "dns"
+	// BACKEND_DISCOVERY — default "" (disabled), options: "dns", "kubernetes"
 	cfg.BackendDiscovery = os.Getenv("BACKEND_DISCOVERY")
-	if cfg.BackendDiscovery != "" && cfg.BackendDiscovery != "dns" {
-		return nil, fmt.Errorf("invalid BACKEND_DISCOVERY %q: must be \"\" or \"dns\"", cfg.BackendDiscovery)
+	if cfg.BackendDiscovery != "" && cfg.BackendDiscovery != "dns" && cfg.BackendDiscovery != "kubernetes" {
+		return nil, fmt.Errorf("invalid BACKEND_DISCOVERY %q: must be \"\", \"dns\", or \"kubernetes\"", cfg.BackendDiscovery)
 	}
 
 	// BACKEND_DISCOVERY_HOST — DNS hostname to resolve (required when BACKEND_DISCOVERY=dns)
@@ -223,6 +226,15 @@ func Load() (*Config, error) {
 	}
 	cfg.BackendDiscoveryInterval = backendDiscoveryInterval
 
+	// BACKEND_DISCOVERY_NAMESPACE — Kubernetes namespace (default: auto-detect or "default")
+	cfg.BackendDiscoveryNamespace = os.Getenv("BACKEND_DISCOVERY_NAMESPACE")
+
+	// BACKEND_DISCOVERY_SELECTOR — label selector for EndpointSlices (required when BACKEND_DISCOVERY=kubernetes)
+	cfg.BackendDiscoverySelector = os.Getenv("BACKEND_DISCOVERY_SELECTOR")
+
+	// BACKEND_DISCOVERY_PORT_NAME — named port to match in EndpointSlice (empty = first port)
+	cfg.BackendDiscoveryPortName = os.Getenv("BACKEND_DISCOVERY_PORT_NAME")
+
 	// Cross-field validation
 	if cfg.AccountsDiscovery != "" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY requires ROUTING_MODE=assignment")
@@ -232,6 +244,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.BackendDiscovery == "dns" && cfg.BackendDiscoveryHost == "" {
 		return nil, fmt.Errorf("BACKEND_DISCOVERY=dns requires BACKEND_DISCOVERY_HOST")
+	}
+	if cfg.BackendDiscovery == "kubernetes" && cfg.BackendDiscoverySelector == "" {
+		return nil, fmt.Errorf("BACKEND_DISCOVERY=kubernetes requires BACKEND_DISCOVERY_SELECTOR")
 	}
 	if cfg.RebalanceStrategy != "none" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("REBALANCE_STRATEGY requires ROUTING_MODE=assignment")

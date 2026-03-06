@@ -11,6 +11,12 @@ import (
 	"sticky-proxy/internal/config"
 )
 
+// BackendDiscoverer is implemented by backend discovery mechanisms (DNS, Kubernetes).
+type BackendDiscoverer interface {
+	Start(ctx context.Context)
+	Stop()
+}
+
 type Proxy struct {
 	redis            *Redis
 	cache            *UserCache
@@ -22,7 +28,7 @@ type Proxy struct {
 	hooks            *HookClient
 	drain            *DrainManager
 	discovery        *AccountDiscovery
-	backendDiscovery *BackendDiscovery
+	backendDiscovery BackendDiscoverer
 	HealthChecker    *HealthChecker
 	rateLimiter      *RateLimiter
 	closers          []io.Closer
@@ -83,9 +89,21 @@ func New(cfg *config.Config) (*Proxy, error) {
 	hc.rebalancer = rebalancer
 	hc.rebalanceOnScale = cfg.RebalanceOnScale
 
-	var backendDisc *BackendDiscovery
-	if cfg.BackendDiscovery == "dns" {
+	var backendDisc BackendDiscoverer
+	switch cfg.BackendDiscovery {
+	case "dns":
 		backendDisc = NewBackendDiscovery(cfg.BackendDiscoveryHost, cfg.BackendDiscoveryPort, cfg.BackendDiscoveryInterval, r)
+	case "kubernetes":
+		k8sDisc, k8sErr := NewKubernetesBackendDiscovery(
+			cfg.BackendDiscoveryNamespace,
+			cfg.BackendDiscoverySelector,
+			cfg.BackendDiscoveryPortName,
+			r, drain,
+		)
+		if k8sErr != nil {
+			return nil, k8sErr
+		}
+		backendDisc = k8sDisc
 	}
 
 	slog.Info("proxy initialized")

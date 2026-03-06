@@ -11,7 +11,7 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Graceful drain** — drains backends by unassigning all users with concurrent hook notifications before removal
 - **Account discovery** — pre-assigns accounts to backends from Redis sets, HTTP endpoints, or PostgreSQL queries, even when no client is connected
 - **Rebalancing** — redistributes users across backends on scale events using least-loaded or consistent-hash strategies
-- **Backend auto-discovery** — DNS-based discovery of backend pods via Kubernetes headless services or Docker Compose service names
+- **Backend auto-discovery** — DNS polling for headless services / Docker Compose, or event-driven Kubernetes EndpointSlice watch with proactive drain on pod termination
 - **WebSocket support** — full bidirectional proxying with sticky session persistence
 - **Circuit breakers** — for both Redis and individual backends, with automatic CRC32 hash fallback when Redis is unavailable
 - **Active health checking** — periodic backend probes with configurable intervals; optional auto-drain on unhealthy
@@ -448,16 +448,46 @@ SELECT account_id FROM accounts WHERE active = true
 
 | Variable | Default | Description |
 |---|---|---|
-| `BACKEND_DISCOVERY` | *(empty)* | Discovery method: `dns` (disabled by default) |
-| `BACKEND_DISCOVERY_HOST` | *(empty)* | DNS hostname to resolve for backend IPs (required when `BACKEND_DISCOVERY=dns`) |
-| `BACKEND_DISCOVERY_PORT` | `5678` | Port to use when building backend URLs from resolved IPs |
-| `BACKEND_DISCOVERY_INTERVAL` | `10s` | How often to resolve DNS and reconcile backends |
+| `BACKEND_DISCOVERY` | *(empty)* | Discovery method: `dns` or `kubernetes` |
+| `BACKEND_DISCOVERY_HOST` | *(empty)* | DNS hostname to resolve for backend IPs (required when `dns`) |
+| `BACKEND_DISCOVERY_PORT` | `5678` | Port to use when building backend URLs from resolved IPs (`dns` only) |
+| `BACKEND_DISCOVERY_INTERVAL` | `10s` | How often to resolve DNS and reconcile backends (`dns` only) |
+| `BACKEND_DISCOVERY_NAMESPACE` | *(auto-detect)* | Kubernetes namespace. Auto-detects via downward API, falls back to `default` (`kubernetes` only) |
+| `BACKEND_DISCOVERY_SELECTOR` | *(empty)* | Label selector for EndpointSlices, e.g. `kubernetes.io/service-name=my-backend` (required when `kubernetes`) |
+| `BACKEND_DISCOVERY_PORT_NAME` | *(empty)* | Named port to match in EndpointSlice. Empty = first port (`kubernetes` only) |
 
-When enabled, the proxy periodically resolves `BACKEND_DISCOVERY_HOST` via DNS, builds `http://{ip}:{port}` URLs for each resolved address, and syncs them against `backends:active` in Redis. This works with:
+#### DNS mode (`BACKEND_DISCOVERY=dns`)
+
+Periodically resolves `BACKEND_DISCOVERY_HOST` via DNS, builds `http://{ip}:{port}` URLs for each resolved address, and syncs them against `backends:active` in Redis. Works with:
 - **Kubernetes headless services** — DNS returns all pod IPs
 - **Docker Compose** — DNS returns container IPs for service names
 
-Backends discovered via DNS are still validated by the health checker before receiving traffic.
+#### Kubernetes mode (`BACKEND_DISCOVERY=kubernetes`)
+
+Watches [EndpointSlice](https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/) resources via `k8s.io/client-go` informers. Event-driven — no polling. Uses in-cluster config automatically, falling back to `KUBECONFIG` / `~/.kube/config` for local development.
+
+The key advantage over DNS is **proactive drain on pod termination**. EndpointSlice exposes three conditions per endpoint:
+
+| Condition | Meaning |
+|---|---|
+| `ready` | Pod is passing readiness probes |
+| `serving` | Pod can still serve traffic (even while terminating) |
+| `terminating` | Pod received SIGTERM, shutdown in progress |
+
+The proxy maps these to backend actions:
+
+| State | Conditions | Action |
+|---|---|---|
+| Starting | `ready=false, serving=false, terminating=false` | Ignore (not ready yet) |
+| Ready | `ready=true, serving=true, terminating=false` | Add to `backends:active` |
+| Terminating | `ready=false, serving=true, terminating=true` | **Start drain immediately** |
+| Gone | Removed from EndpointSlice | Remove from `backends:active` |
+
+When a pod enters the **Terminating** state, the proxy starts draining it immediately — while the pod is still `serving=true`, so unassign hooks land reliably. This turns drain from a "react to health-check failure" pattern into a "coordinate with the orchestrator" pattern.
+
+**RBAC requirements:** The proxy's ServiceAccount needs `get`, `list`, and `watch` on `endpointslices` in the `discovery.k8s.io` API group within the configured namespace.
+
+Backends discovered via either method are still validated by the health checker before receiving traffic.
 
 ### Rebalancing
 
@@ -574,7 +604,8 @@ internal/
     discovery_redis.go    # Redis set account source
     discovery_http.go     # HTTP JSON account source
     discovery_postgres.go  # PostgreSQL query account source
-    discovery_backends.go  # DNS-based backend pod discovery
+    discovery_backends.go     # DNS-based backend pod discovery
+    discovery_kubernetes.go   # Kubernetes EndpointSlice backend discovery
     rebalancer.go          # rebalancing strategies and executor
 pkg/
   ownership/          # backend ownership checker (Redis MGET on sticky:* keys)
