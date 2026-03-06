@@ -18,6 +18,7 @@ type DrainManager struct {
 	routingMode string
 	timeout     time.Duration
 	notifier    CacheNotifier // optional, for cross-replica cache invalidation
+	holdMgr     *HoldManager  // optional, holds requests during transitions
 
 	mu       sync.Mutex
 	draining map[string]context.CancelFunc
@@ -25,7 +26,7 @@ type DrainManager struct {
 
 // NewDrainManager creates a DrainManager.
 // The redis parameter is optional and only used for hash-mode sticky key operations.
-func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration, notifier CacheNotifier) *DrainManager {
+func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration, notifier CacheNotifier, holdMgr *HoldManager) *DrainManager {
 	return &DrainManager{
 		store:       store,
 		redis:       r,
@@ -35,6 +36,7 @@ func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache,
 		routingMode: routingMode,
 		timeout:     timeout,
 		notifier:    notifier,
+		holdMgr:     holdMgr,
 		draining:    make(map[string]context.CancelFunc),
 	}
 }
@@ -101,17 +103,23 @@ func (d *DrainManager) CancelDrain(backend string) {
 func (d *DrainManager) drain(ctx context.Context, backend string) {
 	var users []string
 	var err error
-	if d.routingMode == "assignment" {
+	switch {
+	case d.routingMode == "assignment":
 		users, err = d.store.GetBackendUsers(ctx, backend)
-	} else if d.redis != nil {
+	case d.redis != nil:
 		users, err = d.redis.GetUsersForBackend(ctx, backend)
-	} else {
+	default:
 		// Hash mode without Redis: get affected users from local cache.
 		users = d.cache.UsersForBackend(backend)
 	}
 	if err != nil {
 		slog.Error("drain: failed to get users", "backend", backend, "error", err)
 		return
+	}
+
+	if d.holdMgr != nil && len(users) > 0 {
+		d.holdMgr.MarkTransition(users)
+		defer d.holdMgr.ClearTransition(users)
 	}
 
 	if len(users) > 0 {

@@ -51,7 +51,11 @@ func (n *PostgresCacheNotifier) listen(ctx context.Context, onInvalidate func(ba
 		slog.Error("cache notifier: failed to connect to postgres", "error", err)
 		return
 	}
-	defer conn.Close(context.Background())
+	defer func() {
+		if closeErr := conn.Close(context.Background()); closeErr != nil {
+			slog.Error("cache notifier: failed to close connection", "error", closeErr)
+		}
+	}()
 
 	_, err = conn.Exec(ctx, "LISTEN "+pgCacheInvalidateChannel)
 	if err != nil {

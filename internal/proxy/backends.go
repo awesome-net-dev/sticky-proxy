@@ -104,7 +104,8 @@ func (b *BackendManager) recordFailure(backend string) {
 func (b *BackendManager) invalidateStickyMappings(backend string) {
 	ctx := context.Background()
 
-	if b.routingMode == "assignment" && b.store != nil {
+	switch {
+	case b.routingMode == "assignment" && b.store != nil:
 		users, err := b.store.GetBackendUsers(ctx, backend)
 		if err != nil {
 			slog.Error("failed to get users for backend", "backend", backend, "error", err)
@@ -116,7 +117,7 @@ func (b *BackendManager) invalidateStickyMappings(backend string) {
 				slog.Error("failed to delete assignments", "backend", backend, "error", delErr)
 			}
 		}
-	} else if b.redis != nil {
+	case b.redis != nil:
 		users, err := b.redis.GetUsersForBackend(ctx, backend)
 		if err != nil {
 			slog.Error("failed to get users for backend", "backend", backend, "error", err)
@@ -126,7 +127,7 @@ func (b *BackendManager) invalidateStickyMappings(backend string) {
 		if err := b.redis.InvalidateBackend(ctx, backend); err != nil {
 			slog.Error("failed to invalidate redis mappings", "backend", backend, "error", err)
 		}
-	} else if b.hooks != nil && b.cache != nil {
+	case b.hooks != nil && b.cache != nil:
 		// Hash mode without Redis: get affected users from local cache.
 		users := b.cache.UsersForBackend(backend)
 		if len(users) > 0 {

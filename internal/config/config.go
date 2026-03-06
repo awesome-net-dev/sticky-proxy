@@ -43,6 +43,8 @@ type Config struct {
 	BackendDiscoverySelector  string
 	BackendDiscoveryPortName  string
 	AssignmentStore           string
+	HoldDuringTransition      bool
+	HoldTimeout               time.Duration
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -224,11 +226,12 @@ func Load() (*Config, error) {
 	// Defaults: "memory" for hash mode, "postgres" when ACCOUNTS_DISCOVERY=postgres, "redis" otherwise.
 	cfg.AssignmentStore = os.Getenv("ASSIGNMENT_STORE")
 	if cfg.AssignmentStore == "" {
-		if cfg.AccountsDiscovery == "postgres" {
+		switch {
+		case cfg.AccountsDiscovery == "postgres":
 			cfg.AssignmentStore = "postgres"
-		} else if cfg.RoutingMode == "hash" {
+		case cfg.RoutingMode == "hash":
 			cfg.AssignmentStore = "memory"
-		} else {
+		default:
 			cfg.AssignmentStore = "redis"
 		}
 	}
@@ -264,6 +267,16 @@ func Load() (*Config, error) {
 	if cfg.AccountsDiscovery == "redis" && cfg.AssignmentStore != "redis" {
 		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY=redis requires ASSIGNMENT_STORE=redis")
 	}
+
+	// HOLD_DURING_TRANSITION — default false
+	cfg.HoldDuringTransition = os.Getenv("HOLD_DURING_TRANSITION") == "true"
+
+	// HOLD_TIMEOUT — default 5s
+	holdTimeout, err := parseDuration("HOLD_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid HOLD_TIMEOUT: %w", err)
+	}
+	cfg.HoldTimeout = holdTimeout
 
 	// LOG_FORMAT — default "json", options: "json", "text"
 	cfg.LogFormat = envOrDefault("LOG_FORMAT", "json")

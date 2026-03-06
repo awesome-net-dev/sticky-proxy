@@ -32,6 +32,8 @@ var (
 	drainUsersTotal     uint64
 	rebalanceTotal      uint64
 	rebalanceMovesTotal uint64
+	holdRequests        uint64
+	holdTimeouts        uint64
 )
 
 var drainingBackends int64
@@ -95,6 +97,12 @@ func AddDrainUsers(n uint64) { atomic.AddUint64(&drainUsersTotal, n) }
 
 // AddRebalanceMoves adds n to stickyproxy_rebalance_moves_total.
 func AddRebalanceMoves(n uint64) { atomic.AddUint64(&rebalanceMovesTotal, n) }
+
+// IncHoldRequests increments stickyproxy_hold_requests_total.
+func IncHoldRequests() { atomic.AddUint64(&holdRequests, 1) }
+
+// IncHoldTimeouts increments stickyproxy_hold_timeouts_total.
+func IncHoldTimeouts() { atomic.AddUint64(&holdTimeouts, 1) }
 
 // IncBackendRequests increments stickyproxy_backend_requests_total{backend="name"}.
 func IncBackendRequests(backend string) {
@@ -241,6 +249,14 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	writeCounter(&b, "stickyproxy_rebalance_moves_total",
 		"Total user moves during rebalancing",
 		atomic.LoadUint64(&rebalanceMovesTotal))
+
+	writeCounter(&b, "stickyproxy_hold_requests_total",
+		"Total requests held during assignment transitions",
+		atomic.LoadUint64(&holdRequests))
+
+	writeCounter(&b, "stickyproxy_hold_timeouts_total",
+		"Total held requests that exceeded the hold timeout",
+		atomic.LoadUint64(&holdTimeouts))
 
 	// per-backend request counts
 	b.WriteString("# HELP stickyproxy_backend_requests_total Total requests per backend\n")

@@ -101,7 +101,7 @@ func (s *PostgresStore) GetAllAssignments(ctx context.Context) (result map[strin
 	for rows.Next() {
 		var key string
 		var a Assignment
-		if err = rows.Scan(&key, &a.Backend, &a.AssignedAt, &a.Source); err != nil {
+		if err := rows.Scan(&key, &a.Backend, &a.AssignedAt, &a.Source); err != nil {
 			return nil, err
 		}
 		result[key] = &a
@@ -123,7 +123,7 @@ func (s *PostgresStore) GetBackendUsers(ctx context.Context, backend string) (us
 
 	for rows.Next() {
 		var key string
-		if err = rows.Scan(&key); err != nil {
+		if err := rows.Scan(&key); err != nil {
 			return nil, err
 		}
 		users = append(users, key)
@@ -204,7 +204,7 @@ func (s *PostgresStore) ActiveBackends(ctx context.Context) (backends []string, 
 
 	for rows.Next() {
 		var url string
-		if err = rows.Scan(&url); err != nil {
+		if err := rows.Scan(&url); err != nil {
 			return nil, err
 		}
 		backends = append(backends, url)

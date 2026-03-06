@@ -246,7 +246,7 @@ func TestApplyDesiredState_DrainOnTerminating(t *testing.T) {
 	cache := NewUserCache(time.Minute)
 	t.Cleanup(cache.Stop)
 	store := NewRedisStore(r)
-	drain := NewDrainManager(store, r, nil, cache, nil, "hash", time.Minute, nil)
+	drain := NewDrainManager(store, r, nil, cache, nil, "hash", time.Minute, nil, nil)
 
 	k := newKubernetesBackendDiscovery(fake.NewClientset(), "default", "", "http", store, drain)
 	k.known = map[string]epState{"http://10.0.0.1:8080": epActive}
@@ -269,7 +269,7 @@ func TestApplyDesiredState_CancelDrainOnRecovery(t *testing.T) {
 	cache := NewUserCache(time.Minute)
 	t.Cleanup(cache.Stop)
 	store := NewRedisStore(r)
-	drain := NewDrainManager(store, r, nil, cache, nil, "hash", time.Minute, nil)
+	drain := NewDrainManager(store, r, nil, cache, nil, "hash", time.Minute, nil, nil)
 
 	k := newKubernetesBackendDiscovery(fake.NewClientset(), "default", "", "http", store, drain)
 

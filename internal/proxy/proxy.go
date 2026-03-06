@@ -36,6 +36,7 @@ type Proxy struct {
 	HealthChecker    *HealthChecker
 	rateLimiter      *RateLimiter
 	notifier         CacheNotifier // optional, for cross-replica cache invalidation
+	holdMgr          *HoldManager  // optional, holds requests during assignment transitions
 	closers          []io.Closer
 }
 
@@ -76,7 +77,12 @@ func New(cfg *config.Config) (*Proxy, error) {
 	b := NewBackendManager(store, r, cache, cfg.RoutingMode, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks, notifier)
 	b.Start()
 
-	drain := NewDrainManager(store, r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout, notifier)
+	var holdMgr *HoldManager
+	if cfg.HoldDuringTransition {
+		holdMgr = NewHoldManager(cfg.HoldTimeout)
+	}
+
+	drain := NewDrainManager(store, r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout, notifier, holdMgr)
 
 	var discovery *AccountDiscovery
 	if cfg.AccountsDiscovery != "" {
@@ -106,7 +112,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		case "consistent-hash":
 			strategy = &ConsistentHashStrategy{}
 		}
-		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct, notifier)
+		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct, notifier, holdMgr)
 	}
 
 	hc := NewHealthChecker(store, r)
@@ -151,6 +157,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		HealthChecker:    hc,
 		rateLimiter:      NewRateLimiter(100, 200),
 		notifier:         notifier,
+		holdMgr:          holdMgr,
 		closers:          closers,
 	}, nil
 }
@@ -191,6 +198,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stickyKey := jwtData.RoutingKey
+
+	// Hold request if user is mid-transition (drain/rebalance in progress).
+	if p.holdMgr != nil {
+		p.holdMgr.Wait(ctx, stickyKey)
+	}
+
 	backend, err := p.cache.Get(stickyKey)
 	if err == nil && (!p.backends.Available(backend) || (p.drain != nil && p.drain.IsDraining(backend))) {
 		p.cache.Invalidate(stickyKey)

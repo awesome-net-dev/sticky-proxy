@@ -27,11 +27,12 @@ type Rebalancer struct {
 	cache       *UserCache
 	connTracker *ConnTracker
 	notifier    CacheNotifier // optional, for cross-replica cache invalidation
+	holdMgr     *HoldManager  // optional, holds requests during transitions
 	rebalancing atomic.Bool
 }
 
 // NewRebalancer creates a Rebalancer with the given strategy.
-func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker, notifier CacheNotifier) *Rebalancer {
+func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker, notifier CacheNotifier, holdMgr *HoldManager) *Rebalancer {
 	return &Rebalancer{
 		strategy:    strategy,
 		store:       store,
@@ -39,6 +40,7 @@ func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, c
 		cache:       cache,
 		connTracker: ct,
 		notifier:    notifier,
+		holdMgr:     holdMgr,
 	}
 }
 
@@ -70,6 +72,16 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 
 	IncRebalances()
 	slog.Info("rebalancer: starting", "moves", len(moves))
+
+	// Hold requests for affected users during the entire reassignment.
+	if rb.holdMgr != nil {
+		holdKeys := make([]string, len(moves))
+		for i, m := range moves {
+			holdKeys[i] = m.RoutingKey
+		}
+		rb.holdMgr.MarkTransition(holdKeys)
+		defer rb.holdMgr.ClearTransition(holdKeys)
+	}
 
 	// 1. Group unassigns by FromBackend, send batch hooks.
 	if rb.hooks != nil {
