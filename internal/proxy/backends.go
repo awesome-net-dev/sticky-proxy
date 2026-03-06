@@ -138,11 +138,7 @@ func (b *BackendManager) invalidateStickyMappings(backend string) {
 		b.cache.InvalidateBackend(backend)
 	}
 
-	if b.notifier != nil {
-		if err := b.notifier.Publish(ctx, backend); err != nil {
-			slog.Error("cache notifier: publish failed", "backend", backend, "error", err)
-		}
-	}
+	publishNotification(ctx, b.notifier, backend)
 }
 
 // Available reports whether a backend is currently accepting traffic.

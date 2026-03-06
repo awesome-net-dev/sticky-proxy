@@ -22,6 +22,17 @@ type CacheNotifier interface {
 	Subscribe(ctx context.Context, onInvalidate func(backend string))
 }
 
+// publishNotification publishes a cache invalidation event if the notifier is
+// configured. Logs and swallows errors to avoid disrupting callers.
+func publishNotification(ctx context.Context, notifier CacheNotifier, backend string) {
+	if notifier == nil {
+		return
+	}
+	if err := notifier.Publish(ctx, backend); err != nil {
+		slog.Error("cache notifier: publish failed", "backend", backend, "error", err)
+	}
+}
+
 // subscribeDebouncedNotifier starts a notifier subscriber that debounces
 // invalidation events. Events for the same backend within the window are
 // collapsed into a single InvalidateBackend call.

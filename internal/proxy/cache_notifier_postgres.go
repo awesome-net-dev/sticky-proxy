@@ -35,10 +35,12 @@ func (n *PostgresCacheNotifier) Subscribe(ctx context.Context, onInvalidate func
 		}
 		n.listen(ctx, onInvalidate)
 		// Connection lost; wait before reconnecting.
+		reconnect := time.NewTimer(5 * time.Second)
 		select {
 		case <-ctx.Done():
+			reconnect.Stop()
 			return
-		case <-time.After(5 * time.Second):
+		case <-reconnect.C:
 		}
 	}
 }

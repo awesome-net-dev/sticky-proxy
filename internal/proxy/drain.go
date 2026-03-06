@@ -141,11 +141,7 @@ func (d *DrainManager) drain(ctx context.Context, backend string) {
 		AddDrainUsers(uint64(len(users)))
 	}
 
-	if d.notifier != nil {
-		if err := d.notifier.Publish(ctx, backend); err != nil {
-			slog.Error("cache notifier: publish failed", "backend", backend, "error", err)
-		}
-	}
+	publishNotification(ctx, d.notifier, backend)
 
 	if err := d.store.RemoveBackend(ctx, backend); err != nil {
 		slog.Error("drain: failed to remove backend", "backend", backend, "error", err)

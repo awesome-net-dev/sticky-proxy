@@ -105,9 +105,7 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 		for _, m := range moves {
 			if _, ok := notified[m.FromBackend]; !ok {
 				notified[m.FromBackend] = struct{}{}
-				if err := rb.notifier.Publish(ctx, m.FromBackend); err != nil {
-					slog.Error("cache notifier: publish failed", "backend", m.FromBackend, "error", err)
-				}
+				publishNotification(ctx, rb.notifier, m.FromBackend)
 			}
 		}
 	}
