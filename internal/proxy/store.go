@@ -18,10 +18,10 @@ type Store interface {
 	// GetBackendUsers returns all routing keys assigned to a backend.
 	GetBackendUsers(ctx context.Context, backend string) ([]string, error)
 
-	// BulkAssign assigns multiple routing keys to backends.
+	// BulkAssign assigns multiple routing keys to backends with optional weights.
 	// Uses set-if-not-exists semantics to avoid overwriting live assignments.
 	// Returns the map of actually-assigned routingKey -> backend.
-	BulkAssign(ctx context.Context, assignments map[string]string) (map[string]string, error)
+	BulkAssign(ctx context.Context, assignments map[string]BulkAssignEntry) (map[string]string, error)
 
 	// BulkDeleteAssignments removes assignments for the given routing keys.
 	BulkDeleteAssignments(ctx context.Context, routingKeys []string) error

@@ -28,7 +28,7 @@ func (s *RedisStore) GetBackendUsers(ctx context.Context, backend string) ([]str
 	return s.r.GetBackendUsersFromTable(ctx, backend)
 }
 
-func (s *RedisStore) BulkAssign(ctx context.Context, assignments map[string]string) (map[string]string, error) {
+func (s *RedisStore) BulkAssign(ctx context.Context, assignments map[string]BulkAssignEntry) (map[string]string, error) {
 	return s.r.BulkAssign(ctx, assignments)
 }
 

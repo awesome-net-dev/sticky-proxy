@@ -128,20 +128,28 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 		return
 	}
 
-	// 4. Compute new assignments: use ToBackend if set (consistent-hash),
-	//    otherwise round-robin across active backends (least-loaded).
-	newAssignments := make(map[string]string, len(moves))
+	// 4. Compute new assignments with preserved weights: use ToBackend if set
+	//    (consistent-hash), otherwise round-robin across active backends (least-loaded).
+	newAssignments := make(map[string]BulkAssignEntry, len(moves))
 	var unrouted []string
 	for _, m := range moves {
+		w := 0
+		if a, ok := assignments[m.RoutingKey]; ok {
+			w = a.Weight
+		}
 		if m.ToBackend != "" {
-			newAssignments[m.RoutingKey] = m.ToBackend
+			newAssignments[m.RoutingKey] = BulkAssignEntry{Backend: m.ToBackend, Weight: w}
 		} else {
 			unrouted = append(unrouted, m.RoutingKey)
 		}
 	}
 	if len(unrouted) > 0 && len(activeBackends) > 0 {
 		for i, key := range unrouted {
-			newAssignments[key] = activeBackends[i%len(activeBackends)]
+			w := 0
+			if a, ok := assignments[key]; ok {
+				w = a.Weight
+			}
+			newAssignments[key] = BulkAssignEntry{Backend: activeBackends[i%len(activeBackends)], Weight: w}
 		}
 	}
 
@@ -176,34 +184,43 @@ func (s *LeastLoadedStrategy) ComputeMoves(assignments map[string]*Assignment, a
 		return nil
 	}
 
-	// Count assignments per backend.
-	counts := make(map[string]int, len(activeBackends))
+	// Sum weight per backend.
+	weights := make(map[string]int, len(activeBackends))
 	for _, b := range activeBackends {
-		counts[b] = 0
+		weights[b] = 0
 	}
 	backendUsers := make(map[string][]string)
 	for user, a := range assignments {
-		counts[a.Backend]++
+		weights[a.Backend] += a.EffectiveWeight()
 		backendUsers[a.Backend] = append(backendUsers[a.Backend], user)
 	}
 
-	ideal := len(assignments) / len(activeBackends)
+	totalWeight := 0
+	for _, w := range weights {
+		totalWeight += w
+	}
+	ideal := totalWeight / len(activeBackends)
 	if ideal == 0 {
 		ideal = 1
 	}
 
 	var moves []Move
-	// Move users from overloaded backends.
+	// Move users from overloaded backends until weight is within threshold.
 	for backend, users := range backendUsers {
-		excess := counts[backend] - ideal - 1 // threshold of 1
+		excess := weights[backend] - ideal - 1 // threshold of 1
 		if excess <= 0 {
 			continue
 		}
-		for i := 0; i < excess && i < len(users); i++ {
+		moved := 0
+		for _, user := range users {
+			if moved >= excess {
+				break
+			}
 			moves = append(moves, Move{
-				RoutingKey:  users[i],
+				RoutingKey:  user,
 				FromBackend: backend,
 			})
+			moved += assignments[user].EffectiveWeight()
 		}
 	}
 	return moves

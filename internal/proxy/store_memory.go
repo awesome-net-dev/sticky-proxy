@@ -41,7 +41,7 @@ func (s *MemoryStore) GetBackendUsers(_ context.Context, _ string) ([]string, er
 	return nil, errNotSupported
 }
 
-func (s *MemoryStore) BulkAssign(_ context.Context, _ map[string]string) (map[string]string, error) {
+func (s *MemoryStore) BulkAssign(_ context.Context, _ map[string]BulkAssignEntry) (map[string]string, error) {
 	return nil, errNotSupported
 }
 

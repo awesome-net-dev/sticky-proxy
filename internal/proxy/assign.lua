@@ -13,9 +13,11 @@ if existing then
     if redis.call("SISMEMBER", KEYS[2], data.backend) == 1 then
         return existing
     end
-    -- Backend no longer active; remove stale assignment.
+    -- Backend no longer active; remove stale assignment (decrement by weight).
+    local stale_weight = data.weight or 1
+    if stale_weight <= 0 then stale_weight = 1 end
     redis.call("HDEL", KEYS[1], ARGV[1])
-    redis.call("HINCRBY", KEYS[3], data.backend, -1)
+    redis.call("HINCRBY", KEYS[3], data.backend, -stale_weight)
 end
 
 -- 2. Get active backends.
@@ -35,8 +37,8 @@ for _, b in ipairs(backends) do
     end
 end
 
--- 4. Create assignment and update count.
-local value = cjson.encode({backend=selected, assigned_at=ARGV[2], source="assignment"})
+-- 4. Create assignment and update count (default weight=1 for on-demand assignment).
+local value = cjson.encode({backend=selected, assigned_at=ARGV[2], source="assignment", weight=1})
 redis.call("HSET", KEYS[1], ARGV[1], value)
 redis.call("HINCRBY", KEYS[3], selected, 1)
 return value

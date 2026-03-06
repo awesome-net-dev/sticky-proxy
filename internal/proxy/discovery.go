@@ -7,9 +7,16 @@ import (
 	"time"
 )
 
-// AccountSource provides a list of account IDs that need active routing.
+// DiscoveredAccount represents an account returned by an AccountSource.
+// Weight 0 means default (treated as 1).
+type DiscoveredAccount struct {
+	ID     string `json:"id"`
+	Weight int    `json:"weight,omitempty"`
+}
+
+// AccountSource provides a list of accounts that need active routing.
 type AccountSource interface {
-	FetchAccounts(ctx context.Context) ([]string, error)
+	FetchAccounts(ctx context.Context) ([]DiscoveredAccount, error)
 }
 
 // AccountDiscovery periodically fetches known accounts and ensures they
@@ -71,9 +78,9 @@ func (d *AccountDiscovery) reconcile(ctx context.Context) {
 		return
 	}
 
-	var unassigned []string
+	var unassigned []DiscoveredAccount
 	for _, acct := range accounts {
-		if _, exists := current[acct]; !exists {
+		if _, exists := current[acct.ID]; !exists {
 			unassigned = append(unassigned, acct)
 		}
 	}
@@ -89,9 +96,12 @@ func (d *AccountDiscovery) reconcile(ctx context.Context) {
 	sort.Strings(backends)
 
 	// Round-robin across backends.
-	assignments := make(map[string]string, len(unassigned))
+	assignments := make(map[string]BulkAssignEntry, len(unassigned))
 	for i, acct := range unassigned {
-		assignments[acct] = backends[i%len(backends)]
+		assignments[acct.ID] = BulkAssignEntry{
+			Backend: backends[i%len(backends)],
+			Weight:  acct.Weight,
+		}
 	}
 
 	assigned, err := d.store.BulkAssign(ctx, assignments)

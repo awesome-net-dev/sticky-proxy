@@ -18,6 +18,14 @@ func NewRedisAccountSource(client *redis.Client, key string) *RedisAccountSource
 }
 
 // FetchAccounts returns all members of the configured Redis set.
-func (s *RedisAccountSource) FetchAccounts(ctx context.Context) ([]string, error) {
-	return s.client.SMembers(ctx, s.key).Result()
+func (s *RedisAccountSource) FetchAccounts(ctx context.Context) ([]DiscoveredAccount, error) {
+	ids, err := s.client.SMembers(ctx, s.key).Result()
+	if err != nil {
+		return nil, err
+	}
+	accounts := make([]DiscoveredAccount, len(ids))
+	for i, id := range ids {
+		accounts[i] = DiscoveredAccount{ID: id}
+	}
+	return accounts, nil
 }

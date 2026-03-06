@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -23,8 +24,9 @@ func NewHTTPAccountSource(url string) *HTTPAccountSource {
 	}
 }
 
-// FetchAccounts makes a GET request and parses the JSON array response.
-func (s *HTTPAccountSource) FetchAccounts(ctx context.Context) ([]string, error) {
+// FetchAccounts makes a GET request and parses the JSON response.
+// Accepts either [{"id":"x","weight":5},...] or ["id1","id2",...] format.
+func (s *HTTPAccountSource) FetchAccounts(ctx context.Context) ([]DiscoveredAccount, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
 	if err != nil {
 		return nil, err
@@ -40,9 +42,25 @@ func (s *HTTPAccountSource) FetchAccounts(ctx context.Context) ([]string, error)
 		return nil, fmt.Errorf("HTTP account source returned %d", resp.StatusCode)
 	}
 
-	var accounts []string
-	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return nil, err
+	}
+
+	// Try structured format first.
+	var accounts []DiscoveredAccount
+	if err := json.Unmarshal(body, &accounts); err == nil && (len(accounts) == 0 || accounts[0].ID != "") {
+		return accounts, nil
+	}
+
+	// Fall back to plain string array.
+	var ids []string
+	if err := json.Unmarshal(body, &ids); err != nil {
+		return nil, err
+	}
+	accounts = make([]DiscoveredAccount, len(ids))
+	for i, id := range ids {
+		accounts[i] = DiscoveredAccount{ID: id}
 	}
 	return accounts, nil
 }

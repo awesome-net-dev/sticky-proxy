@@ -24,9 +24,9 @@ func NewPostgresAccountSource(dsn, query string) (*PostgresAccountSource, error)
 	return &PostgresAccountSource{db: db, query: query}, nil
 }
 
-// FetchAccounts executes the configured query and returns all values from the
-// first column as account IDs.
-func (s *PostgresAccountSource) FetchAccounts(ctx context.Context) (accounts []string, err error) {
+// FetchAccounts executes the configured query and returns discovered accounts.
+// If the query returns two columns, the second is used as the account weight.
+func (s *PostgresAccountSource) FetchAccounts(ctx context.Context) (accounts []DiscoveredAccount, err error) {
 	rows, err := s.db.QueryContext(ctx, s.query)
 	if err != nil {
 		return nil, err
@@ -37,12 +37,24 @@ func (s *PostgresAccountSource) FetchAccounts(ctx context.Context) (accounts []s
 		}
 	}()
 
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	hasWeight := len(cols) >= 2
+
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var acct DiscoveredAccount
+		if hasWeight {
+			if err := rows.Scan(&acct.ID, &acct.Weight); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := rows.Scan(&acct.ID); err != nil {
+				return nil, err
+			}
 		}
-		accounts = append(accounts, id)
+		accounts = append(accounts, acct)
 	}
 	return accounts, rows.Err()
 }

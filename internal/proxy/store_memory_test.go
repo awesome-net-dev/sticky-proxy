@@ -78,7 +78,7 @@ func TestMemoryStore_AssignmentMethodsReturnError(t *testing.T) {
 	if _, err := s.GetBackendUsers(ctx, "b"); err == nil {
 		t.Error("expected error from GetBackendUsers")
 	}
-	if _, err := s.BulkAssign(ctx, map[string]string{"a": "b"}); err == nil {
+	if _, err := s.BulkAssign(ctx, map[string]BulkAssignEntry{"a": {Backend: "b"}}); err == nil {
 		t.Error("expected error from BulkAssign")
 	}
 	if err := s.BulkDeleteAssignments(ctx, []string{"a"}); err == nil {

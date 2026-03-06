@@ -11,7 +11,10 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Assign/unassign hooks** — batch-notifies backends when users are assigned or removed (`{"users": [...]}` payload), enabling stateful preloading and teardown
 - **Graceful drain** — drains backends with batch unassign hooks and bulk Redis pipeline deletes; tears down active WebSocket connections so clients reconnect to their new backend
 - **Account discovery** — bulk pre-assigns accounts to backends (round-robin) from Redis sets, HTTP endpoints, or PostgreSQL queries via Redis pipeline (HSETNX)
-- **Rebalancing** — batch-redistributes users across backends on scale events using least-loaded or consistent-hash strategies, with pipelined Redis operations
+- **Weighted assignments** — discovery queries can return per-account weights; least-loaded strategy and rebalancer consider total weight instead of count, preventing heavy accounts from clustering on one pod
+- **Rebalancing** — batch-redistributes users across backends on scale events using least-loaded or consistent-hash strategies, with pipelined Redis operations; preserves account weights through reassignment
+- **Request holding during transitions** — optionally holds in-flight requests during drain/rebalance instead of returning errors, making reassignment invisible to clients
+- **Poison pill detection** — tracks reassignment frequency per account; quarantines accounts that repeatedly crash backends, preventing cascade failures across the cluster
 - **Backend auto-discovery** — DNS polling for headless services / Docker Compose, or event-driven Kubernetes EndpointSlice watch with proactive drain on pod termination
 - **WebSocket support** — full bidirectional proxying with sticky session persistence; connections are tracked per user and torn down on drain/rebalance so clients reconnect to new backends
 - **Cross-replica cache invalidation** — Redis Pub/Sub or PostgreSQL LISTEN/NOTIFY broadcasts backend invalidation events to all proxy replicas with debounced delivery, preventing stale local cache entries after drains, rebalances, or evictions
@@ -19,7 +22,7 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Active health checking** — periodic backend probes with configurable intervals; optional auto-drain on unhealthy
 - **Per-user rate limiting** — token bucket algorithm (100 tokens/sec, 200 burst) with automatic cleanup
 - **Prometheus metrics** — request counters, latency histograms, cache hit rates, hook/drain/rebalance counters on `/metrics`
-- **Admin & debug endpoints** — drain management and per-user routing state inspection
+- **Admin & debug endpoints** — drain management, per-user routing state inspection, and quarantine management
 - **Graceful shutdown** — drains in-flight requests on SIGTERM/SIGINT (30s timeout)
 
 ## Use Cases
@@ -450,10 +453,22 @@ Single-user operations (e.g., first-request assignment) send a single-element ar
 | `ACCOUNTS_QUERY` | *(empty)* | Redis set key, HTTP URL, or SQL query for account discovery |
 | `ACCOUNTS_REFRESH_INTERVAL` | `30s` | How often to reconcile discovered accounts |
 
-When using `postgres` discovery, `ACCOUNTS_QUERY` should be a SQL query that returns a single text column of account IDs, e.g.:
+When using `postgres` discovery, `ACCOUNTS_QUERY` should be a SQL query returning account IDs. Optionally include a second column for weight:
 ```sql
+-- Simple: all accounts with default weight (1)
 SELECT account_id FROM accounts WHERE active = true
+
+-- Weighted: heavy accounts get proportionally more backend capacity
+SELECT account_id, resource_weight FROM accounts WHERE active = true
 ```
+
+When using `http` discovery, the endpoint can return either format:
+```json
+["acct-1", "acct-2"]
+[{"id": "acct-1", "weight": 10}, {"id": "acct-2", "weight": 1}]
+```
+
+Weights flow through to the assignment table and are used by the `least-loaded` rebalance strategy. Accounts with weight 0 or absent default to 1.
 
 ### Backend Discovery
 
@@ -500,12 +515,33 @@ When a pod enters the **Terminating** state, the proxy starts draining it immedi
 
 Backends discovered via either method are still validated by the health checker before receiving traffic.
 
+### Request Holding
+
+| Variable | Default | Description |
+|---|---|---|
+| `HOLD_DURING_TRANSITION` | `false` | Hold in-flight requests during drain/rebalance instead of returning errors |
+| `HOLD_TIMEOUT` | `5s` | Maximum time to hold a request before giving up |
+
+When enabled, requests for users mid-transition (drain or rebalance in progress) are held until the new assignment is ready, making reassignment invisible to clients.
+
+### Poison Pill Detection
+
+| Variable | Default | Description |
+|---|---|---|
+| `POISON_PILL_ACTION` | *(empty)* | Set to `quarantine` to enable poison pill detection |
+| `POISON_PILL_THRESHOLD` | `3` | Number of reassignments within window to trigger quarantine |
+| `POISON_PILL_WINDOW` | `5m` | Sliding window for reassignment tracking |
+
+When an account repeatedly crashes backends (causing forced reassignments), it is quarantined — the proxy returns 503 instead of assigning it to another backend, preventing cascade failures.
+
 ### Rebalancing
 
 | Variable | Default | Description |
 |---|---|---|
 | `REBALANCE_STRATEGY` | `none` | Strategy: `none`, `least-loaded`, or `consistent-hash` (requires `ROUTING_MODE=assignment`) |
 | `REBALANCE_ON_SCALE` | `false` | Trigger rebalance when the backend set changes |
+
+The `least-loaded` strategy considers total weight per backend (not just count) when accounts have weights assigned via discovery.
 
 ## Endpoints
 
@@ -544,8 +580,8 @@ Backends discovered via either method are still validated by the health checker 
 |---|---|---|
 | `sticky:{routingKey}` | STRING | Maps a user to their assigned backend URL (hash mode) |
 | `backends:active` | SET | All currently healthy backend URLs |
-| `assignments` | HASH | routingKey -> JSON `{backend, assigned_at, source}` (assignment mode) |
-| `assignment:counts` | HASH | backend URL -> number of assigned users (assignment mode) |
+| `assignments` | HASH | routingKey -> JSON `{backend, assigned_at, source, weight}` (assignment mode) |
+| `assignment:counts` | HASH | backend URL -> total weight of assigned users (assignment mode) |
 | `sticky-proxy:cache-invalidate` | PUB/SUB | Cross-replica cache invalidation; payload is the backend URL to invalidate |
 
 ## PostgreSQL Data Model
@@ -555,7 +591,7 @@ When `ASSIGNMENT_STORE=postgres`, the proxy auto-creates these tables on startup
 | Table | Key Columns | Description |
 |---|---|---|
 | `backends` | `url` (PK), `healthy`, `discovered_at` | Backend registry. `RemoveBackend` sets `healthy=false` (soft delete). |
-| `assignments` | `routing_key` (PK), `backend`, `assigned_at`, `source` | User-to-backend assignments. Index on `backend` for efficient lookups. |
+| `assignments` | `routing_key` (PK), `backend`, `assigned_at`, `source`, `weight` | User-to-backend assignments with optional weight. Index on `backend` for efficient lookups. |
 
 Cache invalidation uses the `cache_invalidate` NOTIFY channel (payload: backend URL).
 
@@ -583,6 +619,11 @@ Cache invalidation uses the `cache_invalidate` NOTIFY channel (payload: backend 
 | `stickyproxy_active_connections` | gauge | Currently active connections |
 | `stickyproxy_healthy_backends` | gauge | Number of healthy backends |
 | `stickyproxy_draining_backends` | gauge | Number of backends currently draining |
+| `stickyproxy_hold_requests_total` | counter | Requests held during assignment transitions |
+| `stickyproxy_hold_timeouts_total` | counter | Held requests that exceeded the hold timeout |
+| `stickyproxy_poison_pill_detections_total` | counter | Accounts quarantined by poison pill detection |
+| `stickyproxy_poison_pill_blocked_total` | counter | Requests blocked due to account quarantine |
+| `stickyproxy_quarantined_accounts` | gauge | Number of accounts currently quarantined |
 | `stickyproxy_request_duration_seconds` | histogram | Request latency distribution |
 
 ## Development
@@ -635,7 +676,9 @@ internal/
     discovery_postgres.go  # PostgreSQL query account source
     discovery_backends.go     # DNS-based backend pod discovery
     discovery_kubernetes.go   # Kubernetes EndpointSlice backend discovery
-    rebalancer.go          # rebalancing strategies and batch executor
+    rebalancer.go          # rebalancing strategies and batch executor (weight-aware)
+    hold.go                # request holding during assignment transitions
+    poison.go              # poison pill detection and account quarantine
 pkg/
   ownership/          # backend ownership checker (Redis MGET on sticky:* keys)
 k6/                   # load testing utilities

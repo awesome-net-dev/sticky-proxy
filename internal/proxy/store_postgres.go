@@ -40,9 +40,11 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			routing_key TEXT PRIMARY KEY,
 			backend TEXT NOT NULL,
 			assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			source TEXT NOT NULL DEFAULT 'assignment'
+			source TEXT NOT NULL DEFAULT 'assignment',
+			weight INTEGER NOT NULL DEFAULT 1
 		);
 		CREATE INDEX IF NOT EXISTS idx_assignments_backend ON assignments(backend);
+		ALTER TABLE assignments ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 1;
 	`)
 	return err
 }
@@ -55,14 +57,14 @@ func (s *PostgresStore) AssignLeastLoaded(ctx context.Context, routingKey string
 			LEFT JOIN assignments a ON a.backend = b.url
 			WHERE b.healthy = true
 			GROUP BY b.url
-			ORDER BY COUNT(a.routing_key) ASC
+			ORDER BY COALESCE(SUM(a.weight), 0) ASC
 			LIMIT 1
 		)
-		INSERT INTO assignments (routing_key, backend, source)
-		SELECT $1, url, 'assignment' FROM target
+		INSERT INTO assignments (routing_key, backend, source, weight)
+		SELECT $1, url, 'assignment', 1 FROM target
 		ON CONFLICT (routing_key) DO NOTHING
-		RETURNING backend, assigned_at, source
-	`, routingKey).Scan(&a.Backend, &a.AssignedAt, &a.Source)
+		RETURNING backend, assigned_at, source, weight
+	`, routingKey).Scan(&a.Backend, &a.AssignedAt, &a.Source, &a.Weight)
 	if err == sql.ErrNoRows {
 		// Conflict — assignment already exists.
 		return s.GetAssignment(ctx, routingKey)
@@ -76,9 +78,9 @@ func (s *PostgresStore) AssignLeastLoaded(ctx context.Context, routingKey string
 func (s *PostgresStore) GetAssignment(ctx context.Context, routingKey string) (*Assignment, error) {
 	var a Assignment
 	err := s.db.QueryRowContext(ctx,
-		`SELECT backend, assigned_at, source FROM assignments WHERE routing_key = $1`,
+		`SELECT backend, assigned_at, source, weight FROM assignments WHERE routing_key = $1`,
 		routingKey,
-	).Scan(&a.Backend, &a.AssignedAt, &a.Source)
+	).Scan(&a.Backend, &a.AssignedAt, &a.Source, &a.Weight)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +89,7 @@ func (s *PostgresStore) GetAssignment(ctx context.Context, routingKey string) (*
 
 func (s *PostgresStore) GetAllAssignments(ctx context.Context) (result map[string]*Assignment, err error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT routing_key, backend, assigned_at, source FROM assignments`)
+		`SELECT routing_key, backend, assigned_at, source, weight FROM assignments`)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +103,7 @@ func (s *PostgresStore) GetAllAssignments(ctx context.Context) (result map[strin
 	for rows.Next() {
 		var key string
 		var a Assignment
-		if err := rows.Scan(&key, &a.Backend, &a.AssignedAt, &a.Source); err != nil {
+		if err := rows.Scan(&key, &a.Backend, &a.AssignedAt, &a.Source, &a.Weight); err != nil {
 			return nil, err
 		}
 		result[key] = &a
@@ -131,7 +133,7 @@ func (s *PostgresStore) GetBackendUsers(ctx context.Context, backend string) (us
 	return users, rows.Err()
 }
 
-func (s *PostgresStore) BulkAssign(ctx context.Context, assignments map[string]string) (map[string]string, error) {
+func (s *PostgresStore) BulkAssign(ctx context.Context, assignments map[string]BulkAssignEntry) (map[string]string, error) {
 	if len(assignments) == 0 {
 		return nil, nil
 	}
@@ -140,17 +142,21 @@ func (s *PostgresStore) BulkAssign(ctx context.Context, assignments map[string]s
 
 	// Build multi-row INSERT with parameterized values.
 	var query strings.Builder
-	query.WriteString("INSERT INTO assignments (routing_key, backend, assigned_at, source) VALUES ")
+	query.WriteString("INSERT INTO assignments (routing_key, backend, assigned_at, source, weight) VALUES ")
 	args := []any{now} // $1 = timestamp
 	idx := 2
 	first := true
-	for routingKey, backend := range assignments {
+	for routingKey, entry := range assignments {
 		if !first {
 			query.WriteString(", ")
 		}
-		fmt.Fprintf(&query, "($%d, $%d, $1, 'assignment')", idx, idx+1)
-		args = append(args, routingKey, backend)
-		idx += 2
+		w := entry.Weight
+		if w <= 0 {
+			w = 1
+		}
+		fmt.Fprintf(&query, "($%d, $%d, $1, 'assignment', $%d)", idx, idx+1, idx+2)
+		args = append(args, routingKey, entry.Backend, w)
+		idx += 3
 		first = false
 	}
 	query.WriteString(" ON CONFLICT (routing_key) DO NOTHING RETURNING routing_key, backend")

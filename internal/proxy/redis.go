@@ -280,7 +280,7 @@ func (r *Redis) GetAssignment(ctx context.Context, routingKey string) (*Assignme
 	return unmarshalAssignment(val)
 }
 
-// DeleteAssignment removes an assignment and decrements the backend count.
+// DeleteAssignment removes an assignment and decrements the backend weight count.
 func (r *Redis) DeleteAssignment(ctx context.Context, routingKey string) error {
 	val, err := r.client.HGet(ctx, "assignments", routingKey).Result()
 	if err != nil {
@@ -292,7 +292,7 @@ func (r *Redis) DeleteAssignment(ctx context.Context, routingKey string) error {
 	}
 	pipe := r.client.Pipeline()
 	pipe.HDel(ctx, "assignments", routingKey)
-	pipe.HIncrBy(ctx, "assignment:counts", a.Backend, -1)
+	pipe.HIncrBy(ctx, "assignment:counts", a.Backend, -int64(a.EffectiveWeight()))
 	_, err = pipe.Exec(ctx)
 	return err
 }
@@ -345,7 +345,7 @@ func (r *Redis) GetBackendUsersFromTable(ctx context.Context, backend string) ([
 // BulkAssign creates assignments for multiple routing keys using a pipeline.
 // Uses HSETNX to avoid overwriting live-traffic assignments.
 // Returns the map of actually-assigned routingKey -> backend.
-func (r *Redis) BulkAssign(ctx context.Context, assignments map[string]string) (map[string]string, error) {
+func (r *Redis) BulkAssign(ctx context.Context, assignments map[string]BulkAssignEntry) (map[string]string, error) {
 	if len(assignments) == 0 {
 		return nil, nil
 	}
@@ -357,28 +357,33 @@ func (r *Redis) BulkAssign(ctx context.Context, assignments map[string]string) (
 	type pending struct {
 		key     string
 		backend string
+		weight  int
 		cmd     *redis.BoolCmd
 	}
 	items := make([]pending, 0, len(assignments))
-	for routingKey, backend := range assignments {
-		val, err := json.Marshal(Assignment{Backend: backend, AssignedAt: now, Source: "assignment"})
+	for routingKey, entry := range assignments {
+		w := entry.Weight
+		if w <= 0 {
+			w = 1
+		}
+		val, err := json.Marshal(Assignment{Backend: entry.Backend, AssignedAt: now, Source: "assignment", Weight: w})
 		if err != nil {
 			continue
 		}
 		cmd := pipe.HSetNX(ctx, "assignments", routingKey, string(val))
-		items = append(items, pending{routingKey, backend, cmd})
+		items = append(items, pending{routingKey, entry.Backend, w, cmd})
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return nil, err
 	}
 
-	// Phase 2: Aggregate counts per backend for successful assignments.
+	// Phase 2: Aggregate weight per backend for successful assignments.
 	assigned := make(map[string]string)
 	counts := make(map[string]int64)
 	for _, p := range items {
 		if p.cmd.Val() {
 			assigned[p.key] = p.backend
-			counts[p.backend]++
+			counts[p.backend] += int64(p.weight)
 		}
 	}
 
@@ -409,7 +414,7 @@ func (r *Redis) BulkDeleteAssignments(ctx context.Context, routingKeys []string)
 	}
 	_, _ = pipe.Exec(ctx) // some keys may be redis.Nil
 
-	// Collect keys to delete and aggregate backend counts.
+	// Collect keys to delete and aggregate backend weight counts.
 	counts := make(map[string]int64)
 	toDelete := make([]string, 0, len(routingKeys))
 	for i, cmd := range getCmds {
@@ -422,7 +427,7 @@ func (r *Redis) BulkDeleteAssignments(ctx context.Context, routingKeys []string)
 			continue
 		}
 		toDelete = append(toDelete, routingKeys[i])
-		counts[a.Backend]++
+		counts[a.Backend] += int64(a.EffectiveWeight())
 	}
 
 	if len(toDelete) == 0 {
