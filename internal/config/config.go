@@ -9,34 +9,34 @@ import (
 
 // Config holds all configuration values for the sticky-proxy.
 type Config struct {
-	ProxyPort                string
-	RedisAddr                string
-	JWTSecret                string
-	CacheTTL                 time.Duration
-	RedisPoolSize            int
-	RedisMinIdleConns        int
-	RedisCBThreshold         int
-	RedisCBCooldown          time.Duration
-	JWTCacheMaxSize          int
-	EvictionThreshold        int
-	EvictionCooldown         time.Duration
-	BackendHealthInterval    time.Duration
-	LogFormat                string
-	RoutingClaim             string
-	HooksEnabled             bool
-	HooksTimeout             time.Duration
-	HooksRetries             int
-	DrainTimeout             time.Duration
-	DrainMaxConcurrent       int
-	DrainOnUnhealthy         bool
-	RoutingMode              string
-	AccountsDiscovery        string
-	AccountsQuery            string
-	AccountsRefreshInterval  time.Duration
-	PostgresDSN              string
-	RebalanceStrategy        string
-	RebalanceOnScale         bool
-	RebalanceMaxConcurrent   int
+	ProxyPort                 string
+	RedisAddr                 string
+	JWTSecret                 string
+	CacheTTL                  time.Duration
+	RedisPoolSize             int
+	RedisMinIdleConns         int
+	RedisCBThreshold          int
+	RedisCBCooldown           time.Duration
+	JWTCacheMaxSize           int
+	EvictionThreshold         int
+	EvictionCooldown          time.Duration
+	BackendHealthInterval     time.Duration
+	LogFormat                 string
+	RoutingClaim              string
+	HooksEnabled              bool
+	HooksTimeout              time.Duration
+	HooksRetries              int
+	DrainTimeout              time.Duration
+	DrainMaxConcurrent        int
+	DrainOnUnhealthy          bool
+	RoutingMode               string
+	AccountsDiscovery         string
+	AccountsQuery             string
+	AccountsRefreshInterval   time.Duration
+	PostgresDSN               string
+	RebalanceStrategy         string
+	RebalanceOnScale          bool
+	RebalanceMaxConcurrent    int
 	BackendDiscovery          string
 	BackendDiscoveryHost      string
 	BackendDiscoveryPort      string

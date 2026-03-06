@@ -205,8 +205,8 @@ func TestApplyDesiredState_Transitions(t *testing.T) {
 			},
 			desired: map[string]epState{
 				"http://10.0.0.1:8080": epActive,      // unchanged
-				"http://10.0.0.2:8080": epTerminating,  // active → terminating
-				"http://10.0.0.4:8080": epActive,       // new
+				"http://10.0.0.2:8080": epTerminating, // active → terminating
+				"http://10.0.0.4:8080": epActive,      // new
 				// 10.0.0.3 removed
 			},
 			wantKnown: map[string]epState{
