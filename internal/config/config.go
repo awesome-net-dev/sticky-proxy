@@ -9,34 +9,38 @@ import (
 
 // Config holds all configuration values for the sticky-proxy.
 type Config struct {
-	ProxyPort               string
-	RedisAddr               string
-	JWTSecret               string
-	CacheTTL                time.Duration
-	RedisPoolSize           int
-	RedisMinIdleConns       int
-	RedisCBThreshold        int
-	RedisCBCooldown         time.Duration
-	JWTCacheMaxSize         int
-	EvictionThreshold       int
-	EvictionCooldown        time.Duration
-	BackendHealthInterval   time.Duration
-	LogFormat               string
-	RoutingClaim            string
-	HooksEnabled            bool
-	HooksTimeout            time.Duration
-	HooksRetries            int
-	DrainTimeout            time.Duration
-	DrainMaxConcurrent      int
-	DrainOnUnhealthy        bool
-	RoutingMode             string
-	AccountsDiscovery       string
-	AccountsQuery           string
-	AccountsRefreshInterval time.Duration
-	PostgresDSN             string
-	RebalanceStrategy       string
-	RebalanceOnScale        bool
-	RebalanceMaxConcurrent  int
+	ProxyPort                string
+	RedisAddr                string
+	JWTSecret                string
+	CacheTTL                 time.Duration
+	RedisPoolSize            int
+	RedisMinIdleConns        int
+	RedisCBThreshold         int
+	RedisCBCooldown          time.Duration
+	JWTCacheMaxSize          int
+	EvictionThreshold        int
+	EvictionCooldown         time.Duration
+	BackendHealthInterval    time.Duration
+	LogFormat                string
+	RoutingClaim             string
+	HooksEnabled             bool
+	HooksTimeout             time.Duration
+	HooksRetries             int
+	DrainTimeout             time.Duration
+	DrainMaxConcurrent       int
+	DrainOnUnhealthy         bool
+	RoutingMode              string
+	AccountsDiscovery        string
+	AccountsQuery            string
+	AccountsRefreshInterval  time.Duration
+	PostgresDSN              string
+	RebalanceStrategy        string
+	RebalanceOnScale         bool
+	RebalanceMaxConcurrent   int
+	BackendDiscovery         string
+	BackendDiscoveryHost     string
+	BackendDiscoveryPort     string
+	BackendDiscoveryInterval time.Duration
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -200,12 +204,34 @@ func Load() (*Config, error) {
 	}
 	cfg.RebalanceMaxConcurrent = rebalanceMaxConcurrent
 
+	// BACKEND_DISCOVERY — default "" (disabled), options: "dns"
+	cfg.BackendDiscovery = os.Getenv("BACKEND_DISCOVERY")
+	if cfg.BackendDiscovery != "" && cfg.BackendDiscovery != "dns" {
+		return nil, fmt.Errorf("invalid BACKEND_DISCOVERY %q: must be \"\" or \"dns\"", cfg.BackendDiscovery)
+	}
+
+	// BACKEND_DISCOVERY_HOST — DNS hostname to resolve (required when BACKEND_DISCOVERY=dns)
+	cfg.BackendDiscoveryHost = os.Getenv("BACKEND_DISCOVERY_HOST")
+
+	// BACKEND_DISCOVERY_PORT — default "5678"
+	cfg.BackendDiscoveryPort = envOrDefault("BACKEND_DISCOVERY_PORT", "5678")
+
+	// BACKEND_DISCOVERY_INTERVAL — default 10s
+	backendDiscoveryInterval, err := parseDuration("BACKEND_DISCOVERY_INTERVAL", 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid BACKEND_DISCOVERY_INTERVAL: %w", err)
+	}
+	cfg.BackendDiscoveryInterval = backendDiscoveryInterval
+
 	// Cross-field validation
 	if cfg.AccountsDiscovery != "" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY requires ROUTING_MODE=assignment")
 	}
 	if cfg.AccountsDiscovery == "postgres" && cfg.PostgresDSN == "" {
 		return nil, fmt.Errorf("ACCOUNTS_DISCOVERY=postgres requires POSTGRES_DSN")
+	}
+	if cfg.BackendDiscovery == "dns" && cfg.BackendDiscoveryHost == "" {
+		return nil, fmt.Errorf("BACKEND_DISCOVERY=dns requires BACKEND_DISCOVERY_HOST")
 	}
 	if cfg.RebalanceStrategy != "none" && cfg.RoutingMode != "assignment" {
 		return nil, fmt.Errorf("REBALANCE_STRATEGY requires ROUTING_MODE=assignment")

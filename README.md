@@ -11,6 +11,7 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Graceful drain** — drains backends by unassigning all users with concurrent hook notifications before removal
 - **Account discovery** — pre-assigns accounts to backends from Redis sets, HTTP endpoints, or PostgreSQL queries, even when no client is connected
 - **Rebalancing** — redistributes users across backends on scale events using least-loaded or consistent-hash strategies
+- **Backend auto-discovery** — DNS-based discovery of backend pods via Kubernetes headless services or Docker Compose service names
 - **WebSocket support** — full bidirectional proxying with sticky session persistence
 - **Circuit breakers** — for both Redis and individual backends, with automatic CRC32 hash fallback when Redis is unavailable
 - **Active health checking** — periodic backend probes with configurable intervals; optional auto-drain on unhealthy
@@ -443,6 +444,21 @@ When using `postgres` discovery, `ACCOUNTS_QUERY` should be a SQL query that ret
 SELECT account_id FROM accounts WHERE active = true
 ```
 
+### Backend Discovery
+
+| Variable | Default | Description |
+|---|---|---|
+| `BACKEND_DISCOVERY` | *(empty)* | Discovery method: `dns` (disabled by default) |
+| `BACKEND_DISCOVERY_HOST` | *(empty)* | DNS hostname to resolve for backend IPs (required when `BACKEND_DISCOVERY=dns`) |
+| `BACKEND_DISCOVERY_PORT` | `5678` | Port to use when building backend URLs from resolved IPs |
+| `BACKEND_DISCOVERY_INTERVAL` | `10s` | How often to resolve DNS and reconcile backends |
+
+When enabled, the proxy periodically resolves `BACKEND_DISCOVERY_HOST` via DNS, builds `http://{ip}:{port}` URLs for each resolved address, and syncs them against `backends:active` in Redis. This works with:
+- **Kubernetes headless services** — DNS returns all pod IPs
+- **Docker Compose** — DNS returns container IPs for service names
+
+Backends discovered via DNS are still validated by the health checker before receiving traffic.
+
 ### Rebalancing
 
 | Variable | Default | Description |
@@ -557,8 +573,9 @@ internal/
     discovery.go      # account discovery orchestrator
     discovery_redis.go    # Redis set account source
     discovery_http.go     # HTTP JSON account source
-    discovery_postgres.go # PostgreSQL query account source
-    rebalancer.go     # rebalancing strategies and executor
+    discovery_postgres.go  # PostgreSQL query account source
+    discovery_backends.go  # DNS-based backend pod discovery
+    rebalancer.go          # rebalancing strategies and executor
 pkg/
   ownership/          # backend ownership checker (Redis MGET on sticky:* keys)
 k6/                   # load testing utilities

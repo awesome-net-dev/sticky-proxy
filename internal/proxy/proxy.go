@@ -12,19 +12,20 @@ import (
 )
 
 type Proxy struct {
-	redis         *Redis
-	cache         *UserCache
-	backends      *BackendManager
-	jwtCache      *JWTCache
-	jwtSecret     []byte
-	routingClaim  string
-	routingMode   string
-	hooks         *HookClient
-	drain         *DrainManager
-	discovery     *AccountDiscovery
-	HealthChecker *HealthChecker
-	rateLimiter   *RateLimiter
-	closers       []io.Closer
+	redis            *Redis
+	cache            *UserCache
+	backends         *BackendManager
+	jwtCache         *JWTCache
+	jwtSecret        []byte
+	routingClaim     string
+	routingMode      string
+	hooks            *HookClient
+	drain            *DrainManager
+	discovery        *AccountDiscovery
+	backendDiscovery *BackendDiscovery
+	HealthChecker    *HealthChecker
+	rateLimiter      *RateLimiter
+	closers          []io.Closer
 }
 
 func New(cfg *config.Config) (*Proxy, error) {
@@ -82,22 +83,28 @@ func New(cfg *config.Config) (*Proxy, error) {
 	hc.rebalancer = rebalancer
 	hc.rebalanceOnScale = cfg.RebalanceOnScale
 
+	var backendDisc *BackendDiscovery
+	if cfg.BackendDiscovery == "dns" {
+		backendDisc = NewBackendDiscovery(cfg.BackendDiscoveryHost, cfg.BackendDiscoveryPort, cfg.BackendDiscoveryInterval, r)
+	}
+
 	slog.Info("proxy initialized")
 
 	return &Proxy{
-		redis:         r,
-		cache:         cache,
-		backends:      b,
-		jwtCache:      NewJWTCache(cfg.JWTCacheMaxSize),
-		jwtSecret:     []byte(cfg.JWTSecret),
-		routingClaim:  cfg.RoutingClaim,
-		routingMode:   cfg.RoutingMode,
-		hooks:         hooks,
-		drain:         drain,
-		discovery:     discovery,
-		HealthChecker: hc,
-		rateLimiter:   NewRateLimiter(100, 200),
-		closers:       closers,
+		redis:            r,
+		cache:            cache,
+		backends:         b,
+		jwtCache:         NewJWTCache(cfg.JWTCacheMaxSize),
+		jwtSecret:        []byte(cfg.JWTSecret),
+		routingClaim:     cfg.RoutingClaim,
+		routingMode:      cfg.RoutingMode,
+		hooks:            hooks,
+		drain:            drain,
+		discovery:        discovery,
+		backendDiscovery: backendDisc,
+		HealthChecker:    hc,
+		rateLimiter:      NewRateLimiter(100, 200),
+		closers:          closers,
 	}, nil
 }
 
@@ -186,11 +193,17 @@ func (p *Proxy) StartDiscovery(ctx context.Context) {
 	if p.discovery != nil {
 		go p.discovery.Start(ctx)
 	}
+	if p.backendDiscovery != nil {
+		go p.backendDiscovery.Start(ctx)
+	}
 }
 
 func (p *Proxy) Stop() {
 	if p.discovery != nil {
 		p.discovery.Stop()
+	}
+	if p.backendDiscovery != nil {
+		p.backendDiscovery.Stop()
 	}
 	for _, c := range p.closers {
 		_ = c.Close()
