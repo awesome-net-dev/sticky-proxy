@@ -522,14 +522,16 @@ All settings are configured via environment variables. Only `JWT_SECRET` is requ
 
 > **Breaking change:** `ROUTING_CLAIM` defaults to `"sub"` (standard JWT claim). If your tokens use a different claim (e.g., `"userId"`), set `ROUTING_CLAIM=userId`.
 
-**Response header binding for public paths:**
+**Login and sticky assignment:**
 
-When a backend handles a request on a public path (e.g. `/login`), it can set the `X-Sticky-Routing-Key` response header to create a sticky assignment to itself. The proxy captures and strips the header before sending the response to the client. Subsequent authenticated requests from the same routing key will route to the backend that handled the login.
+The recommended pattern is **stateless login** — the `/login` endpoint validates credentials and returns a JWT without creating backend-local state. The first authenticated request triggers normal sticky assignment, and the assign hook (`POST /hooks/assign`) tells the backend to load the user's state. This works consistently across all reassignment scenarios (drain, rebalance, scale-up).
+
+For backends that **must create state during login** (e.g., allocating resources before the JWT exists), an optional `X-Sticky-Routing-Key` response header is supported. When a backend sets this header on a public-path response, the proxy captures and strips it, then creates a sticky binding so subsequent authenticated requests route to the same backend:
 
 ```
 Client → POST /login (no JWT)
   Proxy → round-robin → Backend 2
-  Backend 2 → authenticates user, creates session state
+  Backend 2 → authenticates user, creates local state
   Backend 2 → responds with X-Sticky-Routing-Key: user-42
   Proxy → strips header, caches user-42 → Backend 2
 Client ← 200 OK (header stripped)
@@ -537,6 +539,8 @@ Client ← 200 OK (header stripped)
 Client → GET /api/data (JWT with sub=user-42)
   Proxy → cache hit → Backend 2 (same backend)
 ```
+
+> **Note:** State created via this mechanism must still survive reassignment (e.g., be recoverable via assign hooks), since drains and rebalances can move users at any time.
 
 **Assignment store modes:**
 - `memory` — in-memory backend list only, no external dependencies. Only valid with `ROUTING_MODE=hash`.
