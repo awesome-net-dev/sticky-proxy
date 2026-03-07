@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -50,6 +51,7 @@ type Config struct {
 	PoisonPillAction          string
 	PoisonPillThreshold       int
 	PoisonPillWindow          time.Duration
+	PublicPaths               []string
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -305,6 +307,18 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid POISON_PILL_WINDOW: %w", err)
 	}
 	cfg.PoisonPillWindow = ppWindow
+
+	// PUBLIC_PATHS — comma-separated path prefixes that bypass JWT auth
+	// (e.g. "/login,/register,/oauth"). Requests to these paths are
+	// round-robin proxied without sticky routing.
+	if pp := os.Getenv("PUBLIC_PATHS"); pp != "" {
+		for _, p := range strings.Split(pp, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				cfg.PublicPaths = append(cfg.PublicPaths, p)
+			}
+		}
+	}
 
 	// ADMIN_TOKEN — optional, protects /admin/* and /debug/* endpoints
 	cfg.AdminToken = os.Getenv("ADMIN_TOKEN")

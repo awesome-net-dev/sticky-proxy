@@ -38,6 +38,7 @@ type Proxy struct {
 	notifier         CacheNotifier       // optional, for cross-replica cache invalidation
 	holdMgr          *HoldManager        // optional, holds requests during assignment transitions
 	poisonPill       *PoisonPillDetector // optional, quarantines accounts that crash backends
+	publicPaths      []string            // path prefixes that bypass JWT auth
 	closers          []io.Closer
 }
 
@@ -175,6 +176,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		notifier:         notifier,
 		holdMgr:          holdMgr,
 		poisonPill:       poisonPill,
+		publicPaths:      cfg.PublicPaths,
 		closers:          closers,
 	}, nil
 }
@@ -197,6 +199,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	r = r.WithContext(ctx)
+
+	// Public paths bypass JWT auth and sticky routing entirely.
+	if p.isPublicPath(r.URL.Path) {
+		p.servePublic(w, r)
+		return
+	}
 
 	authHeader := r.Header.Get("Authorization")
 	jwtData, err := extractUserIDFromJWT(authHeader, p.jwtCache, p.jwtSecret, p.routingClaim)
@@ -351,6 +359,35 @@ func (p *Proxy) assignViaHash(ctx context.Context, routingKey string) (string, e
 	sort.Strings(backends)
 	hash := p.backends.Hash(routingKey)
 	return backends[hash%uint32(len(backends))], nil
+}
+
+// isPublicPath checks whether the request path matches any configured public
+// path prefix. Public paths bypass JWT authentication and sticky routing.
+func (p *Proxy) isPublicPath(path string) bool {
+	for _, prefix := range p.publicPaths {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// servePublic handles requests to public paths by round-robin proxying to
+// an available backend without JWT auth or sticky routing.
+func (p *Proxy) servePublic(w http.ResponseWriter, r *http.Request) {
+	backends, err := p.store.ActiveBackends(r.Context())
+	if err != nil || len(backends) == 0 {
+		http.Error(w, "no backend available", http.StatusServiceUnavailable)
+		return
+	}
+	sort.Strings(backends)
+
+	// Simple round-robin: hash the remote address for distribution.
+	hash := HashUser(r.RemoteAddr)
+	backend := backends[hash%uint32(len(backends))]
+
+	IncBackendRequests(backend)
+	p.backends.ProxyRequest(w, r, backend)
 }
 
 // isWebSocket returns true if the request is a WebSocket upgrade.

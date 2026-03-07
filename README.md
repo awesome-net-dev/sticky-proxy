@@ -514,6 +514,7 @@ All settings are configured via environment variables. Only `JWT_SECRET` is requ
 
 | Variable | Default | Description |
 |---|---|---|
+| `PUBLIC_PATHS` | *(empty)* | Comma-separated path prefixes that bypass JWT auth and sticky routing (e.g. `/login,/register,/oauth/`). Requests to these paths are round-robin proxied to any available backend. |
 | `ROUTING_CLAIM` | `sub` | JWT claim used as the routing key |
 | `ROUTING_MODE` | `hash` | Routing strategy: `hash` (CRC32-based) or `assignment` (least-loaded selection via assignment table) |
 | `ASSIGNMENT_STORE` | *(auto)* | Assignment backend: `memory`, `redis`, or `postgres`. Defaults to `memory` for hash mode, `postgres` when `ACCOUNTS_DISCOVERY=postgres`, `redis` otherwise |

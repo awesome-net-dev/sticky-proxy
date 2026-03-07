@@ -147,3 +147,82 @@ func TestProxyServeHTTP_ExpiredJWT(t *testing.T) {
 func TestProxyServeHTTP_BackendUnavailable(t *testing.T) {
 	t.Skip("requires Redis: evicted backend triggers re-assignment via Redis")
 }
+
+// TestProxyServeHTTP_PublicPathBypassesJWT verifies that requests matching a
+// configured public path prefix are proxied without JWT authentication.
+func TestProxyServeHTTP_PublicPathBypassesJWT(t *testing.T) {
+	t.Parallel()
+
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("login ok"))
+	}))
+	defer backendServer.Close()
+
+	p := newTestProxy(t)
+	p.publicPaths = []string{"/login", "/oauth/"}
+	p.store = NewMemoryStore()
+	_ = p.store.AddBackend(t.Context(), backendServer.URL)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/login", nil)
+
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected %d, got %d", http.StatusOK, rec.Code)
+	}
+	if rec.Body.String() != "login ok" {
+		t.Errorf("expected body %q, got %q", "login ok", rec.Body.String())
+	}
+}
+
+// TestProxyServeHTTP_PublicPathPrefixMatch verifies prefix matching semantics.
+func TestProxyServeHTTP_PublicPathPrefixMatch(t *testing.T) {
+	t.Parallel()
+
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backendServer.Close()
+
+	p := newTestProxy(t)
+	p.publicPaths = []string{"/oauth/"}
+	p.store = NewMemoryStore()
+	_ = p.store.AddBackend(t.Context(), backendServer.URL)
+
+	// /oauth/callback should match the /oauth/ prefix.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/oauth/callback?code=abc", nil)
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected %d for /oauth/callback, got %d", http.StatusOK, rec.Code)
+	}
+
+	// /api/data should NOT match — requires JWT.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/api/data", nil)
+	p.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("expected %d for /api/data, got %d", http.StatusUnauthorized, rec2.Code)
+	}
+}
+
+// TestProxyServeHTTP_PublicPathNoBackends returns 503 when no backends available.
+func TestProxyServeHTTP_PublicPathNoBackends(t *testing.T) {
+	t.Parallel()
+
+	p := newTestProxy(t)
+	p.publicPaths = []string{"/login"}
+	p.store = NewMemoryStore()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/login", nil)
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected %d, got %d", http.StatusServiceUnavailable, rec.Code)
+	}
+}
