@@ -70,8 +70,9 @@ func (d *BackendDiscovery) reconcile(ctx context.Context) {
 
 	discovered := make(map[string]struct{}, len(ips))
 	for _, ip := range ips {
-		url := fmt.Sprintf("http://%s:%s", ip, d.port)
-		discovered[url] = struct{}{}
+		host := net.JoinHostPort(ip, d.port)
+		u := fmt.Sprintf("http://%s", host)
+		discovered[u] = struct{}{}
 	}
 
 	current, err := d.store.ActiveBackends(ctx)

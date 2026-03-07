@@ -22,8 +22,9 @@ A high-performance stateful-backend orchestrator written in Go. Routes requests 
 - **Active health checking** — periodic backend probes with configurable intervals; optional auto-drain on unhealthy
 - **Per-user rate limiting** — token bucket algorithm (100 tokens/sec, 200 burst) with automatic cleanup
 - **Prometheus metrics** — request counters, latency histograms, cache hit rates, hook/drain/rebalance counters on `/metrics`
-- **Admin & debug endpoints** — drain management, per-user routing state inspection, and quarantine management
+- **Admin & debug endpoints** — drain management, per-user routing state inspection, and quarantine management; protected by Bearer token auth (`ADMIN_TOKEN`)
 - **Graceful shutdown** — drains in-flight requests on SIGTERM/SIGINT (30s timeout)
+- **Hardened internals** — admin endpoint auth (constant-time comparison), drain/rebalance mutual exclusion, idempotent hold channels, WebSocket write serialization and goroutine lifecycle management, assignment count self-healing, cached reverse proxies, bounded response reads
 
 ## Use Cases
 
@@ -495,6 +496,7 @@ All settings are configured via environment variables. Only `JWT_SECRET` is requ
 | Variable | Default | Description |
 |---|---|---|
 | `JWT_SECRET` | *required* | HMAC secret for JWT validation |
+| `ADMIN_TOKEN` | *(empty)* | Bearer token for `/admin/*` and `/debug/*` endpoints. When empty, admin endpoints return 403. |
 | `PROXY_PORT` | `:8080` | Proxy listen address |
 | `REDIS_ADDR` | `localhost:6379` | Redis/DragonflyDB address |
 | `CACHE_TTL` | `24h` | User-to-backend mapping TTL |
@@ -584,7 +586,7 @@ Weights flow through to the assignment table and are used by the `least-loaded` 
 
 #### DNS mode (`BACKEND_DISCOVERY=dns`)
 
-Periodically resolves `BACKEND_DISCOVERY_HOST` via DNS, builds `http://{ip}:{port}` URLs for each resolved address, and syncs them against `backends:active` in Redis. Works with:
+Periodically resolves `BACKEND_DISCOVERY_HOST` via DNS, builds `http://{ip}:{port}` URLs for each resolved address (IPv6 addresses are bracketed correctly), and syncs them against `backends:active` in Redis. Works with:
 - **Kubernetes headless services** — DNS returns all pod IPs
 - **Docker Compose** — DNS returns container IPs for service names
 
@@ -654,7 +656,7 @@ The `least-loaded` strategy considers total weight per backend (not just count) 
 | `/healthz` | GET | Health check — returns Redis and backend status |
 | `/metrics` | GET | Prometheus metrics in text exposition format |
 
-### Admin
+### Admin (requires `Authorization: Bearer <ADMIN_TOKEN>`)
 
 | Path | Method | Description |
 |---|---|---|
@@ -662,7 +664,7 @@ The `least-loaded` strategy considers total weight per backend (not just count) 
 | `/admin/drain` | GET | List all currently draining backends |
 | `/admin/drain` | DELETE | Cancel a drain. Query param: `backend=<url>` |
 
-### Debug
+### Debug (requires `Authorization: Bearer <ADMIN_TOKEN>`)
 
 | Path | Method | Description |
 |---|---|---|
@@ -727,6 +729,25 @@ Cache invalidation uses the `cache_invalidate` NOTIFY channel (payload: backend 
 | `stickyproxy_quarantined_accounts` | gauge | Number of accounts currently quarantined |
 | `stickyproxy_request_duration_seconds` | histogram | Request latency distribution |
 
+## Security & Reliability
+
+The proxy includes several hardening measures:
+
+- **Admin endpoint authentication** — `/admin/*` and `/debug/*` endpoints require a Bearer token (`ADMIN_TOKEN` env var) verified with constant-time comparison. Endpoints return 403 when no token is configured.
+- **Drain/rebalance mutual exclusion** — a `TransitionLock` prevents concurrent drain and rebalance operations from corrupting assignment state.
+- **Idempotent hold channels** — request hold channels use `sync.Once` to prevent double-close panics on concurrent `ClearTransition` calls.
+- **Rebalancer safety ordering** — cache invalidation happens only *after* new assignments are created; a background-derived context ensures the critical `BulkAssign` step completes even if the parent context is cancelled.
+- **Assignment count self-healing** — if Redis pipeline failures cause `assignment:counts` to drift, the rebalancer triggers `ReconcileAssignmentCounts` to recompute from the source of truth.
+- **WebSocket write serialization** — both client and backend WebSocket connections are protected by mutexes (`gorilla/websocket` is not concurrency-safe for writes).
+- **WebSocket goroutine lifecycle** — reader goroutines are tracked via `context.CancelFunc` and cancelled on bridge exit or backend swap, preventing goroutine leaks.
+- **Cached reverse proxies** — `httputil.ReverseProxy` instances are cached per backend URL, avoiding per-request allocation overhead. Cached entries are purged on backend eviction.
+- **Hook retry context awareness** — webhook retry loops check `ctx.Err()` between attempts, stopping immediately during shutdown instead of retrying against a dead backend.
+- **HTTP response body draining** — hook responses are fully drained before close to enable HTTP connection reuse.
+- **Bounded response reads** — HTTP account discovery limits response body reads to 10 MB, preventing memory exhaustion from misconfigured endpoints.
+- **DNS discovery IPv6 support** — uses `net.JoinHostPort` for correct IPv6 address bracketing, matching the Kubernetes discovery behavior.
+- **Health checker state cleanup** — stale health state entries for permanently removed backends are pruned, preventing unbounded map growth.
+- **Poison pill event cleanup** — empty event slices are deleted from the tracking map during prune cycles, preventing memory growth from accounts that had one-off reassignments.
+
 ## Development
 
 ```bash
@@ -766,8 +787,9 @@ internal/
     hooks.go          # assign/unassign webhook client (batch payloads)
     drain.go          # graceful backend drain manager (batch operations)
     conn_tracker.go   # WebSocket connection tracker for drain/rebalance teardown
-    admin.go          # admin HTTP handlers (/admin/drain)
+    admin.go          # admin HTTP handlers + auth middleware (/admin/drain)
     debug.go          # debug HTTP handler (/debug/routing)
+    transition.go     # drain/rebalance mutual exclusion lock
     assignment.go     # assignment table data types
     assign.lua        # Redis Lua script for assignment-table routing
     sticky.lua        # Redis Lua script for hash-based routing

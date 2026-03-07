@@ -13,6 +13,7 @@ import (
 
 type BackendManager struct {
 	failures          sync.Map
+	proxies           sync.Map // map[string]*httputil.ReverseProxy — cached per backend
 	evictionThreshold int
 	evictionCooldown  time.Duration
 	transport         *http.Transport
@@ -66,22 +67,36 @@ func (b *BackendManager) ProxyRequest(
 		return
 	}
 
-	target, err := url.Parse(backend)
+	proxy, err := b.getOrCreateProxy(backend)
 	if err != nil {
 		slog.Error("invalid backend URL", "backend", backend, "error", err)
 		http.Error(w, "invalid backend", http.StatusBadGateway)
 		return
 	}
+
+	proxy.ServeHTTP(w, r)
+}
+
+func (b *BackendManager) getOrCreateProxy(backend string) (*httputil.ReverseProxy, error) {
+	if v, ok := b.proxies.Load(backend); ok {
+		return v.(*httputil.ReverseProxy), nil
+	}
+
+	target, err := url.Parse(backend)
+	if err != nil {
+		return nil, err
+	}
+
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = b.transport
-
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
 		b.recordFailure(backend)
-		slog.Error("backend proxy error", "backend", backend, "error", err)
+		slog.Error("backend proxy error", "backend", backend, "error", proxyErr)
 		http.Error(w, "backend error", http.StatusBadGateway)
 	}
 
-	proxy.ServeHTTP(w, r)
+	actual, _ := b.proxies.LoadOrStore(backend, proxy)
+	return actual.(*httputil.ReverseProxy), nil
 }
 
 func (b *BackendManager) recordFailure(backend string) {
@@ -98,6 +113,7 @@ func (b *BackendManager) recordFailure(backend string) {
 	f.mu.Unlock()
 
 	if shouldEvict {
+		b.proxies.Delete(backend)
 		slog.Warn("backend circuit breaker opened", "backend", backend, "failureCount", count)
 		go b.invalidateStickyMappings(backend)
 	}

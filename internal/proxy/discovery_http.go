@@ -42,7 +42,8 @@ func (s *HTTPAccountSource) FetchAccounts(ctx context.Context) ([]DiscoveredAcco
 		return nil, fmt.Errorf("HTTP account source returned %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	const maxBodySize = 10 << 20 // 10 MB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return nil, err
 	}

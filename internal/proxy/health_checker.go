@@ -124,6 +124,14 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 	for b := range hc.states {
 		allBackends = append(allBackends, b)
 	}
+
+	// Prune states for backends absent from the active set for too long.
+	// A backend not in the active set and marked unhealthy is stale.
+	for b, s := range hc.states {
+		if _, active := knownURLs[b]; !active && !s.healthy {
+			delete(hc.states, b)
+		}
+	}
 	hc.mu.Unlock()
 
 	client := &http.Client{Timeout: hc.httpTimeout}
