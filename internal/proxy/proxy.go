@@ -372,8 +372,34 @@ func (p *Proxy) isPublicPath(path string) bool {
 	return false
 }
 
+// stickyHeaderName is the response header that backends can set to create a
+// sticky assignment for a routing key to the responding backend. The proxy
+// captures and strips this header before sending the response to the client.
+const stickyHeaderName = "X-Sticky-Routing-Key"
+
+// stickyResponseWriter wraps http.ResponseWriter to intercept the
+// X-Sticky-Routing-Key response header from the backend.
+type stickyResponseWriter struct {
+	http.ResponseWriter
+	routingKey string
+}
+
+func (sw *stickyResponseWriter) WriteHeader(code int) {
+	if key := sw.Header().Get(stickyHeaderName); key != "" {
+		sw.routingKey = key
+		sw.Header().Del(stickyHeaderName)
+	}
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *stickyResponseWriter) Unwrap() http.ResponseWriter {
+	return sw.ResponseWriter
+}
+
 // servePublic handles requests to public paths by round-robin proxying to
 // an available backend without JWT auth or sticky routing.
+// If the backend responds with X-Sticky-Routing-Key, the proxy creates a
+// sticky assignment so subsequent authenticated requests route to that backend.
 func (p *Proxy) servePublic(w http.ResponseWriter, r *http.Request) {
 	backends, err := p.store.ActiveBackends(r.Context())
 	if err != nil || len(backends) == 0 {
@@ -386,8 +412,35 @@ func (p *Proxy) servePublic(w http.ResponseWriter, r *http.Request) {
 	hash := HashUser(r.RemoteAddr)
 	backend := backends[hash%uint32(len(backends))]
 
+	sw := &stickyResponseWriter{ResponseWriter: w}
 	IncBackendRequests(backend)
-	p.backends.ProxyRequest(w, r, backend)
+	p.backends.ProxyRequest(sw, r, backend)
+
+	if sw.routingKey != "" {
+		p.bindStickyKey(r.Context(), sw.routingKey, backend)
+	}
+}
+
+// bindStickyKey creates a sticky assignment for the given routing key to the
+// specified backend. Called when a public-path backend response includes the
+// X-Sticky-Routing-Key header.
+func (p *Proxy) bindStickyKey(ctx context.Context, routingKey, backend string) {
+	p.cache.Set(routingKey, backend)
+
+	if p.routingMode == "assignment" {
+		_, err := p.store.BulkAssign(ctx, map[string]BulkAssignEntry{
+			routingKey: {Backend: backend, Weight: 1},
+		})
+		if err != nil {
+			slog.Warn("failed to persist sticky binding", "routingKey", routingKey, "backend", backend, "error", err)
+		}
+	}
+
+	if p.hooks != nil {
+		go p.hooks.SendAssign(context.Background(), backend, []string{routingKey})
+	}
+
+	slog.Debug("sticky binding created from response header", "routingKey", routingKey, "backend", backend)
 }
 
 // isWebSocket returns true if the request is a WebSocket upgrade.

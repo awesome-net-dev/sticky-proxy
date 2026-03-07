@@ -226,3 +226,125 @@ func TestProxyServeHTTP_PublicPathNoBackends(t *testing.T) {
 		t.Errorf("expected %d, got %d", http.StatusServiceUnavailable, rec.Code)
 	}
 }
+
+// TestProxyServeHTTP_PublicPathStickyHeader verifies that when a backend
+// responds with X-Sticky-Routing-Key, the proxy creates a sticky cache entry
+// and strips the header from the client response.
+func TestProxyServeHTTP_PublicPathStickyHeader(t *testing.T) {
+	t.Parallel()
+
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Sticky-Routing-Key", "user-login-42")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("logged in"))
+	}))
+	defer backendServer.Close()
+
+	p := newTestProxy(t)
+	p.publicPaths = []string{"/login"}
+	p.store = NewMemoryStore()
+	_ = p.store.AddBackend(t.Context(), backendServer.URL)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/login", nil)
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	// Header must be stripped from the client response.
+	if got := rec.Header().Get("X-Sticky-Routing-Key"); got != "" {
+		t.Errorf("expected X-Sticky-Routing-Key to be stripped, got %q", got)
+	}
+
+	// Cache should now map user-login-42 -> backend URL.
+	cached, err := p.cache.Get("user-login-42")
+	if err != nil {
+		t.Fatalf("expected cache hit for user-login-42, got error: %v", err)
+	}
+	if cached != backendServer.URL {
+		t.Errorf("expected cached backend %q, got %q", backendServer.URL, cached)
+	}
+}
+
+// TestProxyServeHTTP_PublicPathNoStickyHeader verifies that when a backend
+// does not set X-Sticky-Routing-Key, no sticky binding is created.
+func TestProxyServeHTTP_PublicPathNoStickyHeader(t *testing.T) {
+	t.Parallel()
+
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("no sticky"))
+	}))
+	defer backendServer.Close()
+
+	p := newTestProxy(t)
+	p.publicPaths = []string{"/login"}
+	p.store = NewMemoryStore()
+	_ = p.store.AddBackend(t.Context(), backendServer.URL)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/login", nil)
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	// No binding should exist.
+	if _, err := p.cache.Get("user-login-42"); err == nil {
+		t.Error("expected no cache entry, but found one")
+	}
+}
+
+// TestProxyServeHTTP_StickyHeaderRoutesToSameBackend verifies the end-to-end
+// flow: login on public path sets sticky header, subsequent authenticated
+// request routes to the same backend.
+func TestProxyServeHTTP_StickyHeaderRoutesToSameBackend(t *testing.T) {
+	t.Parallel()
+
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			w.Header().Set("X-Sticky-Routing-Key", "user-e2e-sticky")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("logged in"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("api response"))
+	}))
+	defer backendServer.Close()
+
+	p := newTestProxy(t)
+	p.publicPaths = []string{"/login"}
+	p.store = NewMemoryStore()
+	_ = p.store.AddBackend(t.Context(), backendServer.URL)
+
+	// Step 1: Hit /login (public path) — backend sets sticky header.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/login", nil)
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: expected %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	// Step 2: Hit /api/data with a JWT for user-e2e-sticky — should use cached backend.
+	tokenStr := makeToken(t, jwt.MapClaims{
+		"userId": "user-e2e-sticky",
+		"exp":    float64(time.Now().Add(time.Hour).Unix()),
+	})
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/api/data", nil)
+	req2.Header.Set("Authorization", "Bearer "+tokenStr)
+	p.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("api: expected %d, got %d", http.StatusOK, rec2.Code)
+	}
+	if rec2.Body.String() != "api response" {
+		t.Errorf("expected body %q, got %q", "api response", rec2.Body.String())
+	}
+}

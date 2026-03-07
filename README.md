@@ -514,13 +514,29 @@ All settings are configured via environment variables. Only `JWT_SECRET` is requ
 
 | Variable | Default | Description |
 |---|---|---|
-| `PUBLIC_PATHS` | *(empty)* | Comma-separated path prefixes that bypass JWT auth and sticky routing (e.g. `/login,/register,/oauth/`). Requests to these paths are round-robin proxied to any available backend. |
+| `PUBLIC_PATHS` | *(empty)* | Comma-separated path prefixes that bypass JWT auth and sticky routing (e.g. `/login,/register,/oauth/`). Requests to these paths are round-robin proxied to any available backend. Backends can set `X-Sticky-Routing-Key` in the response to create a sticky binding (see below). |
 | `ROUTING_CLAIM` | `sub` | JWT claim used as the routing key |
 | `ROUTING_MODE` | `hash` | Routing strategy: `hash` (CRC32-based) or `assignment` (least-loaded selection via assignment table) |
 | `ASSIGNMENT_STORE` | *(auto)* | Assignment backend: `memory`, `redis`, or `postgres`. Defaults to `memory` for hash mode, `postgres` when `ACCOUNTS_DISCOVERY=postgres`, `redis` otherwise |
 | `POSTGRES_DSN` | *(empty)* | PostgreSQL connection string (required when `ASSIGNMENT_STORE=postgres` or `ACCOUNTS_DISCOVERY=postgres`) |
 
 > **Breaking change:** `ROUTING_CLAIM` defaults to `"sub"` (standard JWT claim). If your tokens use a different claim (e.g., `"userId"`), set `ROUTING_CLAIM=userId`.
+
+**Response header binding for public paths:**
+
+When a backend handles a request on a public path (e.g. `/login`), it can set the `X-Sticky-Routing-Key` response header to create a sticky assignment to itself. The proxy captures and strips the header before sending the response to the client. Subsequent authenticated requests from the same routing key will route to the backend that handled the login.
+
+```
+Client → POST /login (no JWT)
+  Proxy → round-robin → Backend 2
+  Backend 2 → authenticates user, creates session state
+  Backend 2 → responds with X-Sticky-Routing-Key: user-42
+  Proxy → strips header, caches user-42 → Backend 2
+Client ← 200 OK (header stripped)
+
+Client → GET /api/data (JWT with sub=user-42)
+  Proxy → cache hit → Backend 2 (same backend)
+```
 
 **Assignment store modes:**
 - `memory` — in-memory backend list only, no external dependencies. Only valid with `ROUTING_MODE=hash`.
