@@ -1,0 +1,72 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/awesome-net-dev/sticky-proxy/proxy
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+
+rbac:
+  # Enable RBAC for Kubernetes EndpointSlice discovery
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+probes:
+  readiness:
+    path: /healthz
+    initialDelaySeconds: 3
+    periodSeconds: 10
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+# Proxy configuration (injected as env vars via ConfigMap)
+config:
+  REDIS_ADDR: "redis:6379"
+  PROXY_PORT: ":8080"
+  ROUTING_MODE: "hash"
+  BACKEND_DISCOVERY: "kubernetes"
+  BACKEND_DISCOVERY_SELECTOR: "app=backend"
+  BACKEND_DISCOVERY_PORT_NAME: "http"
+  BACKEND_HEALTH_INTERVAL: "10s"
+  LOG_FORMAT: "json"
+
+# JWT secret — set via --set or external secret
+jwtSecret: ""
+
+# Reference an existing Secret instead of creating one
+existingSecret:
+  name: ""
+  key: "jwt-secret"
+
+terminationGracePeriodSeconds: 45
+
+podAnnotations: {}
+podLabels: {}
+
+pdb:
+  create: true
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

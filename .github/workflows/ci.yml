@@ -9,6 +9,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/proxy
+  CHART_REPO: ${{ github.repository }}/charts
 
 jobs:
   build-and-test:
@@ -71,3 +72,32 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  publish-chart:
+    needs: [build-and-test, lint]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Set chart version
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          BASE_VERSION=$(grep '^version:' charts/proxy/Chart.yaml | awk '{print $2}')
+          sed -i "s/^version:.*/version: ${BASE_VERSION}-sha.${SHORT_SHA}/" charts/proxy/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"sha-${SHORT_SHA}\"/" charts/proxy/Chart.yaml
+
+      - name: Package chart
+        run: helm package charts/proxy --destination .helm-packages
+
+      - name: Push chart
+        run: helm push .helm-packages/*.tgz oci://${{ env.REGISTRY }}/${{ env.CHART_REPO }}

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-config
+data:
+  REDIS_ADDR: "redis:6379"
+  PROXY_PORT: ":8080"
+  BACKEND_DISCOVERY: "kubernetes"
+  BACKEND_DISCOVERY_SELECTOR: "app=backend"
+  BACKEND_DISCOVERY_PORT_NAME: "http"
+  BACKEND_DISCOVERY_NAMESPACE: "sticky-proxy"
+  BACKEND_HEALTH_INTERVAL: "10s"
+  ROUTING_MODE: "hash"
+  LOG_FORMAT: "json"

@@ -1,0 +1,15 @@
+{{- if .Values.pdb.create }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sticky-proxy.fullname" . }}
+  labels:
+    {{- include "sticky-proxy.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "sticky-proxy.selectorLabels" . | nindent 6 }}
+{{- end }}

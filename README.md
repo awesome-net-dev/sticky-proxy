@@ -346,6 +346,8 @@ sequenceDiagram
 
 ### Deployment Topology
 
+#### Docker Compose
+
 ```mermaid
 graph TB
     subgraph Docker Compose
@@ -370,6 +372,46 @@ graph TB
     B1 & B2 & B3 -->|self-register on startup| DF
 ```
 
+#### Kubernetes
+
+```mermaid
+graph TB
+    subgraph ns["Namespace: sticky-proxy"]
+        subgraph proxy_deploy["Proxy Deployment (2 replicas)"]
+            P1[proxy-abc :8080]
+            P2[proxy-def :8080]
+        end
+
+        SVC_P[Service: proxy :8080]
+        SA[ServiceAccount + RBAC]
+
+        subgraph redis_sts["Redis StatefulSet"]
+            R1[dragonfly-0 :6379]
+        end
+
+        SVC_R[Service: redis :6379]
+
+        subgraph backend_deploy["Backend Deployment (3 replicas)"]
+            B1[backend-aaa :5678]
+            B2[backend-bbb :5678]
+            B3[backend-ccc :5678]
+        end
+
+        SVC_B["Headless Service: backend"]
+        ES[EndpointSlice]
+    end
+
+    Ingress((Ingress)) -->|:8080| SVC_P
+    SVC_P --> P1 & P2
+    P1 & P2 -->|watch EndpointSlice| ES
+    SA -.->|RBAC: get/list/watch endpointslices| ES
+    ES --> SVC_B
+    SVC_B --> B1 & B2 & B3
+    P1 & P2 <--> SVC_R
+    SVC_R --> R1
+    B1 & B2 & B3 -->|self-register| R1
+```
+
 ## Quick Start
 
 ### Docker Compose
@@ -381,6 +423,52 @@ docker compose up -d
 ```
 
 The proxy is available at `http://localhost:8080`.
+
+### Kubernetes (raw manifests)
+
+The `k8s/` directory contains plain manifests managed by Kustomize:
+
+```bash
+# Edit k8s/secret.yaml — set a real JWT secret
+kubectl apply -k k8s/
+```
+
+This creates the `sticky-proxy` namespace with DragonflyDB, 3 backend replicas, 2 proxy replicas, RBAC for EndpointSlice discovery, and a PodDisruptionBudget.
+
+### Kubernetes (Helm)
+
+A Helm chart is published as an OCI artifact to GHCR on every push to `main`:
+
+```bash
+helm install proxy oci://ghcr.io/awesome-net-dev/sticky-proxy/charts/sticky-proxy \
+  --namespace sticky-proxy --create-namespace \
+  --set jwtSecret=your-secret-key
+```
+
+Or reference an existing Secret:
+
+```bash
+helm install proxy oci://ghcr.io/awesome-net-dev/sticky-proxy/charts/sticky-proxy \
+  --namespace sticky-proxy --create-namespace \
+  --set existingSecret.name=my-jwt-secret \
+  --set existingSecret.key=jwt-secret
+```
+
+Key values:
+
+| Value | Default | Description |
+|---|---|---|
+| `replicaCount` | `1` | Proxy replicas |
+| `image.repository` | `ghcr.io/awesome-net-dev/sticky-proxy/proxy` | Proxy image |
+| `image.tag` | `latest` | Image tag |
+| `jwtSecret` | *(empty)* | JWT secret (creates a Secret) |
+| `existingSecret.name` | *(empty)* | Use an existing Secret instead |
+| `config.*` | *(see values.yaml)* | Proxy env vars (ConfigMap) |
+| `rbac.create` | `true` | Create Role/RoleBinding for EndpointSlice watch |
+| `pdb.create` | `true` | Create PodDisruptionBudget |
+| `pdb.minAvailable` | `1` | Minimum available pods during disruptions |
+
+See [`charts/proxy/values.yaml`](charts/proxy/values.yaml) for the full list.
 
 ### Build from Source
 
@@ -694,6 +782,9 @@ internal/
     poison.go              # poison pill detection and account quarantine
 pkg/
   ownership/          # backend ownership checker (Redis MGET on sticky:* keys)
+charts/
+  proxy/              # Helm chart for the proxy (OCI artifact published to GHCR)
+k8s/                  # plain Kubernetes manifests (Kustomize)
 k6/                   # load testing utilities
 ```
 
@@ -702,6 +793,7 @@ k6/                   # load testing utilities
 GitHub Actions runs on push to `main` and on pull requests:
 - Build, vet, format check, and tests (with `-race`)
 - Linting via golangci-lint v2.4
+- On push to `main`: builds and pushes the proxy Docker image and Helm chart to GHCR
 
 ## License
 
