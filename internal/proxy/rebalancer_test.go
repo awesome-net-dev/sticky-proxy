@@ -198,7 +198,7 @@ func TestRebalancer_PreservesWeightsInReassignment(t *testing.T) {
 	cache := NewUserCache(time.Minute)
 	t.Cleanup(cache.Stop)
 
-	rb := NewRebalancer(&LeastLoadedStrategy{}, store, nil, cache, nil, nil, nil, &TransitionLock{}, true)
+	rb := NewRebalancer(&LeastLoadedStrategy{}, store, nil, cache, nil, nil, nil, NewTransitionLock(nil), true)
 	rb.rebalance(context.Background(), []string{"b1", "b2"})
 
 	store.mu.Lock()
@@ -347,7 +347,7 @@ func TestRebalancer_WSSwapOnRebalanceTrue(t *testing.T) {
 	cache := NewUserCache(time.Minute)
 	t.Cleanup(cache.Stop)
 
-	rb := NewRebalancer(&forceMoveStrategy{}, store, nil, cache, ct, nil, nil, &TransitionLock{}, true)
+	rb := NewRebalancer(&forceMoveStrategy{}, store, nil, cache, ct, nil, nil, NewTransitionLock(nil), true)
 	rb.rebalance(context.Background(), store.backends)
 
 	// Give the swap time to dial the new backend.
@@ -375,7 +375,7 @@ func TestRebalancer_WSSwapOnRebalanceFalse(t *testing.T) {
 	cache := NewUserCache(time.Minute)
 	t.Cleanup(cache.Stop)
 
-	rb := NewRebalancer(&forceMoveStrategy{}, store, nil, cache, ct, nil, nil, &TransitionLock{}, false)
+	rb := NewRebalancer(&forceMoveStrategy{}, store, nil, cache, ct, nil, nil, NewTransitionLock(nil), false)
 	rb.rebalance(context.Background(), store.backends)
 
 	// Give the close time to propagate.

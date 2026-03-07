@@ -734,7 +734,7 @@ Cache invalidation uses the `cache_invalidate` NOTIFY channel (payload: backend 
 The proxy includes several hardening measures:
 
 - **Admin endpoint authentication** — `/admin/*` and `/debug/*` endpoints require a Bearer token (`ADMIN_TOKEN` env var) verified with constant-time comparison. Endpoints return 403 when no token is configured.
-- **Drain/rebalance mutual exclusion** — a `TransitionLock` prevents concurrent drain and rebalance operations from corrupting assignment state.
+- **Drain/rebalance mutual exclusion** — a `TransitionLock` prevents concurrent drain and rebalance operations both within a replica (local mutex) and across replicas (distributed lock via Redis `SET NX EX` or PostgreSQL `pg_try_advisory_lock`). When multiple replicas detect a scale event simultaneously, only one executes the rebalance; others skip gracefully. Drain retries until the lock is available (it's critical to complete), while rebalance skips if contended (it's idempotent and will be retried on the next scale event).
 - **Idempotent hold channels** — request hold channels use `sync.Once` to prevent double-close panics on concurrent `ClearTransition` calls.
 - **Rebalancer safety ordering** — cache invalidation happens only *after* new assignments are created; a background-derived context ensures the critical `BulkAssign` step completes even if the parent context is cancelled.
 - **Assignment count self-healing** — if Redis pipeline failures cause `assignment:counts` to drift, the rebalancer triggers `ReconcileAssignmentCounts` to recompute from the source of truth.
@@ -789,7 +789,7 @@ internal/
     conn_tracker.go   # WebSocket connection tracker for drain/rebalance teardown
     admin.go          # admin HTTP handlers + auth middleware (/admin/drain)
     debug.go          # debug HTTP handler (/debug/routing)
-    transition.go     # drain/rebalance mutual exclusion lock
+    transition.go     # drain/rebalance mutual exclusion (local + distributed lock)
     assignment.go     # assignment table data types
     assign.lua        # Redis Lua script for assignment-table routing
     sticky.lua        # Redis Lua script for hash-based routing

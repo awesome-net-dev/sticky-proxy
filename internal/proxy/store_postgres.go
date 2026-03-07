@@ -244,3 +244,60 @@ func (s *PostgresStore) DB() *sql.DB {
 func (s *PostgresStore) Close() error {
 	return s.db.Close()
 }
+
+// --- Distributed locking ---
+
+// pgTransitionLockID is the advisory lock key used for drain/rebalance mutual
+// exclusion across replicas. The value is arbitrary but must be consistent.
+const pgTransitionLockID = 0x5350_5458 // "SPTX" in hex
+
+// PostgresDistributedLocker implements DistributedLocker using PostgreSQL
+// session-level advisory locks. The lock is held for the duration of the
+// database connection and is automatically released if the connection drops.
+type PostgresDistributedLocker struct {
+	db   *sql.DB
+	conn *sql.Conn // non-nil while lock is held
+}
+
+// NewPostgresDistributedLocker creates a distributed locker backed by PostgreSQL.
+func NewPostgresDistributedLocker(db *sql.DB) *PostgresDistributedLocker {
+	return &PostgresDistributedLocker{db: db}
+}
+
+func (l *PostgresDistributedLocker) TryLock(ctx context.Context) (bool, error) {
+	conn, err := l.db.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	var acquired bool
+	err = conn.QueryRowContext(ctx,
+		"SELECT pg_try_advisory_lock($1)", pgTransitionLockID,
+	).Scan(&acquired)
+	if err != nil {
+		_ = conn.Close()
+		return false, err
+	}
+	if !acquired {
+		_ = conn.Close()
+		return false, nil
+	}
+
+	l.conn = conn
+	return true, nil
+}
+
+func (l *PostgresDistributedLocker) Unlock(ctx context.Context) error {
+	if l.conn == nil {
+		return nil
+	}
+	_, err := l.conn.ExecContext(ctx,
+		"SELECT pg_advisory_unlock($1)", pgTransitionLockID,
+	)
+	closeErr := l.conn.Close()
+	l.conn = nil
+	if err != nil {
+		return err
+	}
+	return closeErr
+}

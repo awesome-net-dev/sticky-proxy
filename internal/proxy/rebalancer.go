@@ -62,8 +62,11 @@ func (rb *Rebalancer) Trigger(ctx context.Context, activeBackends []string) {
 }
 
 func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
-	rb.tLock.Lock()
-	defer rb.tLock.Unlock()
+	if !rb.tLock.Lock(ctx) {
+		slog.Info("rebalancer: skipped, another replica holds the transition lock")
+		return
+	}
+	defer rb.tLock.Unlock(ctx)
 
 	sort.Strings(activeBackends)
 

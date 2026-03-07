@@ -103,8 +103,18 @@ func (d *DrainManager) CancelDrain(backend string) {
 }
 
 func (d *DrainManager) drain(ctx context.Context, backend string) {
-	d.tLock.Lock()
-	defer d.tLock.Unlock()
+	if !d.tLock.Lock(ctx) {
+		slog.Warn("drain: waiting for transition lock", "backend", backend)
+		// Drain is critical — retry until we acquire the lock or context expires.
+		for !d.tLock.Lock(ctx) {
+			if ctx.Err() != nil {
+				slog.Error("drain: abandoned, context expired while waiting for lock", "backend", backend)
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	defer d.tLock.Unlock(ctx)
 
 	var users []string
 	var err error

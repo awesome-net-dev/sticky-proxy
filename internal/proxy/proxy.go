@@ -83,7 +83,16 @@ func New(cfg *config.Config) (*Proxy, error) {
 		holdMgr = NewHoldManager(cfg.HoldTimeout)
 	}
 
-	tLock := &TransitionLock{}
+	var distLocker DistributedLocker
+	switch {
+	case r != nil:
+		distLocker = NewRedisDistributedLocker(r.client, 60*time.Second)
+	case cfg.AssignmentStore == "postgres":
+		if pgStore, ok := store.(*PostgresStore); ok {
+			distLocker = NewPostgresDistributedLocker(pgStore.DB())
+		}
+	}
+	tLock := NewTransitionLock(distLocker)
 	drain := NewDrainManager(store, r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout, notifier, holdMgr, tLock)
 
 	var discovery *AccountDiscovery

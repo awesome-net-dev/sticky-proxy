@@ -491,3 +491,29 @@ func (r *Redis) BulkDeleteSticky(ctx context.Context, userIDs []string) error {
 	_, err := pipe.Exec(ctx)
 	return err
 }
+
+// --- Distributed locking ---
+
+const redisTransitionLockKey = "sticky-proxy:transition-lock"
+
+// RedisDistributedLocker implements DistributedLocker using a Redis SET NX EX
+// lock. The lock auto-expires after the TTL as a safety net in case the holder
+// crashes without releasing it.
+type RedisDistributedLocker struct {
+	client *redis.Client
+	ttl    time.Duration
+}
+
+// NewRedisDistributedLocker creates a distributed locker backed by Redis.
+func NewRedisDistributedLocker(client *redis.Client, ttl time.Duration) *RedisDistributedLocker {
+	return &RedisDistributedLocker{client: client, ttl: ttl}
+}
+
+func (l *RedisDistributedLocker) TryLock(ctx context.Context) (bool, error) {
+	ok, err := l.client.SetNX(ctx, redisTransitionLockKey, "1", l.ttl).Result()
+	return ok, err
+}
+
+func (l *RedisDistributedLocker) Unlock(ctx context.Context) error {
+	return l.client.Del(ctx, redisTransitionLockKey).Err()
+}
