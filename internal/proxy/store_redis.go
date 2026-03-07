@@ -48,8 +48,8 @@ func (s *RedisStore) RemoveBackend(ctx context.Context, backend string) error {
 	return s.r.RemoveBackend(ctx, backend)
 }
 
-func (s *RedisStore) Ping(_ context.Context) error {
-	return s.r.Ping()
+func (s *RedisStore) Ping(ctx context.Context) error {
+	return s.r.Ping(ctx)
 }
 
 func (s *RedisStore) Close() error {

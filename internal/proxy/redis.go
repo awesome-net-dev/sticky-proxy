@@ -207,9 +207,9 @@ func (r *Redis) InvalidateBackend(ctx context.Context, backend string) error {
 	return nil
 }
 
-// Ping checks if Redis is alive
-func (r *Redis) Ping() error {
-	return r.client.Ping(context.Background()).Err()
+// Ping checks if Redis is alive.
+func (r *Redis) Ping(ctx context.Context) error {
+	return r.client.Ping(ctx).Err()
 }
 
 // ActiveBackends returns all members of the backends:active set.

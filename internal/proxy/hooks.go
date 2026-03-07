@@ -57,6 +57,9 @@ func (h *HookClient) send(ctx context.Context, backend, path string, routingKeys
 	url := backend + path
 	var lastErr error
 	for attempt := 0; attempt <= h.retries; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return err

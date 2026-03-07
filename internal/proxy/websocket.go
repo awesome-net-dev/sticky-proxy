@@ -108,8 +108,9 @@ type WSBridge struct {
 	backendMu sync.Mutex  // serializes writes to backend conn
 	swapCh    chan string // buffered(1), receives new backend URL
 
-	// Lifecycle management for backend reader goroutine.
-	readerCancel context.CancelFunc
+	// Lifecycle management for reader goroutines.
+	clientCancel context.CancelFunc // cancels client reader goroutine
+	readerCancel context.CancelFunc // cancels backend reader goroutine
 }
 
 func newWSBridge(client, backend *websocket.Conn, routingKey string, header http.Header, path, rawQuery string) *WSBridge {
@@ -160,7 +161,11 @@ func (b *WSBridge) writeBackend(msgType int, data []byte) error {
 }
 
 func (b *WSBridge) run() {
+	clientCtx, clientCancel := context.WithCancel(context.Background())
+	b.clientCancel = clientCancel
+
 	defer func() {
+		clientCancel()
 		_ = b.client.Close()
 		_ = b.backend.Close()
 		if b.readerCancel != nil {
@@ -170,7 +175,7 @@ func (b *WSBridge) run() {
 
 	// Single client reader goroutine for the bridge lifetime.
 	clientCh := make(chan wsMsg, 8)
-	go wsReadPump(context.Background(), b.client, clientCh)
+	go wsReadPump(clientCtx, b.client, clientCh)
 
 	backendCh := b.startBackendReader()
 

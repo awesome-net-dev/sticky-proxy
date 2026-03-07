@@ -66,7 +66,12 @@ func (b *BackendManager) ProxyRequest(
 		return
 	}
 
-	target, _ := url.Parse(backend)
+	target, err := url.Parse(backend)
+	if err != nil {
+		slog.Error("invalid backend URL", "backend", backend, "error", err)
+		http.Error(w, "invalid backend", http.StatusBadGateway)
+		return
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = b.transport
 
@@ -102,7 +107,8 @@ func (b *BackendManager) recordFailure(backend string) {
 // that has been evicted, so users are re-assigned on the next request.
 // If hooks are enabled, unassign hooks are sent before deleting mappings.
 func (b *BackendManager) invalidateStickyMappings(backend string) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	switch {
 	case b.routingMode == "assignment" && b.store != nil:

@@ -135,7 +135,12 @@ func (p *PoisonPillDetector) prune() {
 		if i == len(events) {
 			delete(p.events, key)
 		} else if i > 0 {
-			p.events[key] = events[i:]
+			events = events[i:]
+			if len(events) == 0 {
+				delete(p.events, key)
+			} else {
+				p.events[key] = events
+			}
 		}
 	}
 }
