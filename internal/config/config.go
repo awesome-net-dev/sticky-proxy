@@ -12,6 +12,7 @@ type Config struct {
 	ProxyPort                 string
 	RedisAddr                 string
 	JWTSecret                 string
+	AdminToken                string
 	CacheTTL                  time.Duration
 	RedisPoolSize             int
 	RedisMinIdleConns         int
@@ -304,6 +305,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid POISON_PILL_WINDOW: %w", err)
 	}
 	cfg.PoisonPillWindow = ppWindow
+
+	// ADMIN_TOKEN — optional, protects /admin/* and /debug/* endpoints
+	cfg.AdminToken = os.Getenv("ADMIN_TOKEN")
 
 	// LOG_FORMAT — default "json", options: "json", "text"
 	cfg.LogFormat = envOrDefault("LOG_FORMAT", "json")

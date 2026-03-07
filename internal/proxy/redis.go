@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
 	"log/slog"
 	"sync"
@@ -108,7 +109,11 @@ func (r *Redis) AssignBackend(
 	}
 
 	r.recordCBSuccess()
-	return res.(string), nil
+	backend, ok := res.(string)
+	if !ok {
+		return "", errors.New("unexpected redis response type")
+	}
+	return backend, nil
 }
 
 // RefreshBackendList updates the cached backend list used for hash fallback.
@@ -124,7 +129,7 @@ func (r *Redis) RefreshBackendList(ctx context.Context) {
 
 // hashFallback performs CRC32 modulo routing over cached backends.
 func (r *Redis) hashFallback(hash uint32) string {
-	backends := r.cachedBackends.Load().([]string)
+	backends, _ := r.cachedBackends.Load().([]string)
 	if len(backends) == 0 {
 		return ""
 	}
@@ -268,7 +273,11 @@ func (r *Redis) AssignViaTable(ctx context.Context, routingKey string) (*Assignm
 		return nil, err
 	}
 
-	return unmarshalAssignment(res.(string))
+	s, ok := res.(string)
+	if !ok {
+		return nil, errors.New("unexpected redis response type")
+	}
+	return unmarshalAssignment(s)
 }
 
 // GetAssignment retrieves a single assignment from the Redis hash.
@@ -393,11 +402,37 @@ func (r *Redis) BulkAssign(ctx context.Context, assignments map[string]BulkAssig
 			countPipe.HIncrBy(ctx, "assignment:counts", backend, n)
 		}
 		if _, err := countPipe.Exec(ctx); err != nil {
+			slog.Error("bulk assign: count increment failed, reconciling", "error", err)
+			if recErr := r.ReconcileAssignmentCounts(ctx); recErr != nil {
+				slog.Error("bulk assign: count reconciliation failed", "error", recErr)
+			}
 			return assigned, err
 		}
 	}
 
 	return assigned, nil
+}
+
+// ReconcileAssignmentCounts recomputes assignment:counts from the assignments
+// hash. Call this when count increments fail to prevent permanent drift.
+func (r *Redis) ReconcileAssignmentCounts(ctx context.Context) error {
+	assignments, err := r.GetAllAssignments(ctx)
+	if err != nil {
+		return err
+	}
+
+	counts := make(map[string]int64)
+	for _, a := range assignments {
+		counts[a.Backend] += int64(a.EffectiveWeight())
+	}
+
+	pipe := r.client.Pipeline()
+	pipe.Del(ctx, "assignment:counts")
+	for backend, n := range counts {
+		pipe.HSet(ctx, "assignment:counts", backend, n)
+	}
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
 // BulkDeleteAssignments removes multiple assignments and decrements backend counts.

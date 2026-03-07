@@ -6,20 +6,30 @@ import (
 	"time"
 )
 
+// holdEntry tracks a single in-flight transition with safe close semantics.
+type holdEntry struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (h *holdEntry) close() {
+	h.once.Do(func() { close(h.done) })
+}
+
 // HoldManager tracks routing keys that are "in transition" during drains and
 // rebalances. Requests for transitioning keys are held (blocked) until the
 // transition completes or the hold timeout expires, preventing clients from
 // seeing errors during reassignment.
 type HoldManager struct {
 	mu      sync.Mutex
-	holds   map[string]chan struct{}
+	holds   map[string]*holdEntry
 	timeout time.Duration
 }
 
 // NewHoldManager creates a HoldManager with the given per-request hold timeout.
 func NewHoldManager(timeout time.Duration) *HoldManager {
 	return &HoldManager{
-		holds:   make(map[string]chan struct{}),
+		holds:   make(map[string]*holdEntry),
 		timeout: timeout,
 	}
 }
@@ -32,19 +42,19 @@ func (h *HoldManager) MarkTransition(routingKeys []string) {
 	defer h.mu.Unlock()
 	for _, key := range routingKeys {
 		if _, ok := h.holds[key]; !ok {
-			h.holds[key] = make(chan struct{})
+			h.holds[key] = &holdEntry{done: make(chan struct{})}
 		}
 	}
 }
 
 // ClearTransition releases all waiters for the given routing keys and removes
-// them from the transition set.
+// them from the transition set. Safe to call multiple times for the same keys.
 func (h *HoldManager) ClearTransition(routingKeys []string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, key := range routingKeys {
-		if ch, ok := h.holds[key]; ok {
-			close(ch)
+		if entry, ok := h.holds[key]; ok {
+			entry.close()
 			delete(h.holds, key)
 		}
 	}
@@ -56,7 +66,7 @@ func (h *HoldManager) ClearTransition(routingKeys []string) {
 // the key is not in transition.
 func (h *HoldManager) Wait(ctx context.Context, routingKey string) bool {
 	h.mu.Lock()
-	ch, ok := h.holds[routingKey]
+	entry, ok := h.holds[routingKey]
 	h.mu.Unlock()
 	if !ok {
 		return false
@@ -67,7 +77,7 @@ func (h *HoldManager) Wait(ctx context.Context, routingKey string) bool {
 	timer := time.NewTimer(h.timeout)
 	defer timer.Stop()
 	select {
-	case <-ch:
+	case <-entry.done:
 		return true
 	case <-timer.C:
 		IncHoldTimeouts()

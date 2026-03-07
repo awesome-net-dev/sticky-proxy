@@ -83,7 +83,8 @@ func New(cfg *config.Config) (*Proxy, error) {
 		holdMgr = NewHoldManager(cfg.HoldTimeout)
 	}
 
-	drain := NewDrainManager(store, r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout, notifier, holdMgr)
+	tLock := &TransitionLock{}
+	drain := NewDrainManager(store, r, hooks, cache, ct, cfg.RoutingMode, cfg.DrainTimeout, notifier, holdMgr, tLock)
 
 	var discovery *AccountDiscovery
 	if cfg.AccountsDiscovery != "" {
@@ -113,7 +114,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		case "consistent-hash":
 			strategy = &ConsistentHashStrategy{}
 		}
-		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct, notifier, holdMgr, cfg.WSSwapOnRebalance)
+		rebalancer = NewRebalancer(strategy, store, hooks, cache, ct, notifier, holdMgr, tLock, cfg.WSSwapOnRebalance)
 	}
 
 	hc := NewHealthChecker(store, r)

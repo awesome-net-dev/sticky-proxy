@@ -33,14 +33,18 @@ func main() {
 	go p.HealthChecker.Start(healthCtx)
 	p.StartDiscovery(healthCtx)
 
+	adminAuth := func(h http.HandlerFunc) http.HandlerFunc {
+		return proxy.AdminAuth(cfg.AdminToken, h)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/", p)
 	mux.HandleFunc("/healthz", p.Healthz)
 	mux.HandleFunc("/metrics", proxy.MetricsHandler)
-	mux.HandleFunc("POST /admin/drain", p.AdminDrainHandler)
-	mux.HandleFunc("GET /admin/drain", p.AdminDrainStatusHandler)
-	mux.HandleFunc("DELETE /admin/drain", p.AdminCancelDrainHandler)
-	mux.HandleFunc("GET /debug/routing", p.DebugRoutingHandler)
+	mux.HandleFunc("POST /admin/drain", adminAuth(p.AdminDrainHandler))
+	mux.HandleFunc("GET /admin/drain", adminAuth(p.AdminDrainStatusHandler))
+	mux.HandleFunc("DELETE /admin/drain", adminAuth(p.AdminCancelDrainHandler))
+	mux.HandleFunc("GET /debug/routing", adminAuth(p.DebugRoutingHandler))
 
 	srv := &http.Server{
 		Addr:    cfg.ProxyPort,

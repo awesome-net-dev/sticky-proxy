@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync/atomic"
+	"time"
 )
 
 // Move represents a user reassignment from one backend to another.
@@ -26,14 +27,15 @@ type Rebalancer struct {
 	hooks             *HookClient
 	cache             *UserCache
 	connTracker       *ConnTracker
-	notifier          CacheNotifier // optional, for cross-replica cache invalidation
-	holdMgr           *HoldManager  // optional, holds requests during transitions
-	wsSwapOnRebalance bool          // true = transparent swap; false = close + reconnect
+	notifier          CacheNotifier   // optional, for cross-replica cache invalidation
+	holdMgr           *HoldManager    // optional, holds requests during transitions
+	tLock             *TransitionLock // prevents concurrent drain/rebalance
+	wsSwapOnRebalance bool            // true = transparent swap; false = close + reconnect
 	rebalancing       atomic.Bool
 }
 
 // NewRebalancer creates a Rebalancer with the given strategy.
-func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker, notifier CacheNotifier, holdMgr *HoldManager, wsSwap bool) *Rebalancer {
+func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, cache *UserCache, ct *ConnTracker, notifier CacheNotifier, holdMgr *HoldManager, tLock *TransitionLock, wsSwap bool) *Rebalancer {
 	return &Rebalancer{
 		strategy:          strategy,
 		store:             store,
@@ -42,6 +44,7 @@ func NewRebalancer(strategy RebalanceStrategy, store Store, hooks *HookClient, c
 		connTracker:       ct,
 		notifier:          notifier,
 		holdMgr:           holdMgr,
+		tLock:             tLock,
 		wsSwapOnRebalance: wsSwap,
 	}
 }
@@ -59,6 +62,9 @@ func (rb *Rebalancer) Trigger(ctx context.Context, activeBackends []string) {
 }
 
 func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
+	rb.tLock.Lock()
+	defer rb.tLock.Unlock()
+
 	sort.Strings(activeBackends)
 
 	assignments, err := rb.store.GetAllAssignments(ctx)
@@ -105,29 +111,7 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 		slog.Error("rebalancer: bulk delete failed", "error", err)
 	}
 
-	// 3. Invalidate cache for moved users (WebSocket swap happens after new assignment).
-	for _, m := range moves {
-		rb.cache.Invalidate(m.RoutingKey)
-	}
-
-	// 3b. Notify other replicas to invalidate their caches for affected backends.
-	if rb.notifier != nil {
-		notified := make(map[string]struct{})
-		for _, m := range moves {
-			if _, ok := notified[m.FromBackend]; !ok {
-				notified[m.FromBackend] = struct{}{}
-				publishNotification(ctx, rb.notifier, m.FromBackend)
-			}
-		}
-	}
-
-	// Bail out if context was cancelled during unassign/delete phase.
-	if ctx.Err() != nil {
-		slog.Warn("rebalancer: context cancelled after delete phase", "error", ctx.Err())
-		return
-	}
-
-	// 4. Compute new assignments with preserved weights: use ToBackend if set
+	// 3. Compute new assignments with preserved weights: use ToBackend if set
 	//    (consistent-hash), otherwise round-robin across active backends (least-loaded).
 	newAssignments := make(map[string]BulkAssignEntry, len(moves))
 	var unrouted []string
@@ -152,10 +136,29 @@ func (rb *Rebalancer) rebalance(ctx context.Context, activeBackends []string) {
 		}
 	}
 
-	// 5. Bulk assign new backends.
-	assigned, err := rb.store.BulkAssign(ctx, newAssignments)
+	// 4. Bulk assign new backends. Uses a background-derived context so this
+	//    critical step completes even if the parent context was cancelled —
+	//    old assignments are already deleted, so users have no routing without new ones.
+	assignCtx, assignCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer assignCancel()
+	assigned, err := rb.store.BulkAssign(assignCtx, newAssignments)
 	if err != nil {
 		slog.Error("rebalancer: bulk assign failed", "error", err)
+	}
+
+	// 5. Invalidate cache AFTER new assignments are created so users always have
+	//    a valid assignment to fall back to when the cache is cleared.
+	for _, m := range moves {
+		rb.cache.Invalidate(m.RoutingKey)
+	}
+	if rb.notifier != nil {
+		notified := make(map[string]struct{})
+		for _, m := range moves {
+			if _, ok := notified[m.FromBackend]; !ok {
+				notified[m.FromBackend] = struct{}{}
+				publishNotification(ctx, rb.notifier, m.FromBackend)
+			}
+		}
 	}
 
 	// 6. Group assigns by backend, send batch hooks.

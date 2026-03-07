@@ -1,9 +1,29 @@
 package proxy
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"strings"
 )
+
+// AdminAuth returns middleware that protects endpoints with a Bearer token.
+// If token is empty, all requests are rejected with 403.
+func AdminAuth(token string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if token == "" {
+			http.Error(w, "admin endpoints disabled (ADMIN_TOKEN not set)", http.StatusForbidden)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		provided := strings.TrimPrefix(auth, "Bearer ")
+		if provided == auth || subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
 
 // AdminDrainHandler handles POST /admin/drain?backend=<url>.
 func (p *Proxy) AdminDrainHandler(w http.ResponseWriter, r *http.Request) {

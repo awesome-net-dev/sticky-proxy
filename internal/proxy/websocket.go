@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -96,13 +98,18 @@ type wsMsg struct {
 // continues — the client connection stays open throughout.
 type WSBridge struct {
 	client     *websocket.Conn
+	clientMu   sync.Mutex // serializes writes to client conn
 	routingKey string
 	reqHeader  http.Header
 	path       string
 	rawQuery   string
 
-	backend *websocket.Conn
-	swapCh  chan string // buffered(1), receives new backend URL
+	backend   *websocket.Conn
+	backendMu sync.Mutex  // serializes writes to backend conn
+	swapCh    chan string // buffered(1), receives new backend URL
+
+	// Lifecycle management for backend reader goroutine.
+	readerCancel context.CancelFunc
 }
 
 func newWSBridge(client, backend *websocket.Conn, routingKey string, header http.Header, path, rawQuery string) *WSBridge {
@@ -130,23 +137,40 @@ func (b *WSBridge) SwapBackend(newURL string) {
 // Close sends a GoingAway frame and closes the client connection.
 // Used during drain when the backend is being removed entirely.
 func (b *WSBridge) Close() {
+	b.clientMu.Lock()
 	_ = b.client.WriteControl(
 		websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseGoingAway, "backend reassigned"),
 		time.Now().Add(5*time.Second),
 	)
+	b.clientMu.Unlock()
 	_ = b.client.Close()
+}
+
+func (b *WSBridge) writeClient(msgType int, data []byte) error {
+	b.clientMu.Lock()
+	defer b.clientMu.Unlock()
+	return b.client.WriteMessage(msgType, data)
+}
+
+func (b *WSBridge) writeBackend(msgType int, data []byte) error {
+	b.backendMu.Lock()
+	defer b.backendMu.Unlock()
+	return b.backend.WriteMessage(msgType, data)
 }
 
 func (b *WSBridge) run() {
 	defer func() {
 		_ = b.client.Close()
 		_ = b.backend.Close()
+		if b.readerCancel != nil {
+			b.readerCancel()
+		}
 	}()
 
 	// Single client reader goroutine for the bridge lifetime.
 	clientCh := make(chan wsMsg, 8)
-	go wsReadPump(b.client, clientCh)
+	go wsReadPump(context.Background(), b.client, clientCh)
 
 	backendCh := b.startBackendReader()
 
@@ -156,7 +180,7 @@ func (b *WSBridge) run() {
 			if msg.err != nil {
 				return
 			}
-			if err := b.backend.WriteMessage(msg.msgType, msg.data); err != nil {
+			if err := b.writeBackend(msg.msgType, msg.data); err != nil {
 				if newURL := b.pendingSwap(); newURL != "" {
 					if ch := b.doSwap(newURL, clientCh); ch != nil {
 						backendCh = ch
@@ -179,12 +203,14 @@ func (b *WSBridge) run() {
 					websocket.CloseNormalClosure,
 					websocket.CloseGoingAway,
 				) {
+					b.clientMu.Lock()
 					_ = b.client.WriteMessage(websocket.CloseMessage,
 						websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+					b.clientMu.Unlock()
 				}
 				return
 			}
-			if err := b.client.WriteMessage(msg.msgType, msg.data); err != nil {
+			if err := b.writeClient(msg.msgType, msg.data); err != nil {
 				return
 			}
 
@@ -203,13 +229,22 @@ func (b *WSBridge) run() {
 // doSwap dials the new backend, forwards any queued client messages,
 // and starts a new backend reader. Returns the new backend channel, or nil on failure.
 func (b *WSBridge) doSwap(newURL string, clientCh <-chan wsMsg) <-chan wsMsg {
+	// Cancel the old backend reader goroutine.
+	if b.readerCancel != nil {
+		b.readerCancel()
+		b.readerCancel = nil
+	}
+
 	newConn, err := b.dialBackend(newURL)
 	if err != nil {
 		slog.Error("ws: swap dial failed", "routingKey", b.routingKey, "error", err)
 		return nil
 	}
 	_ = b.backend.Close() // close old (may already be closed)
+
+	b.backendMu.Lock()
 	b.backend = newConn
+	b.backendMu.Unlock()
 
 	// Forward any client messages queued during the swap.
 	for {
@@ -218,7 +253,7 @@ func (b *WSBridge) doSwap(newURL string, clientCh <-chan wsMsg) <-chan wsMsg {
 			if msg.err != nil {
 				return nil
 			}
-			if err := newConn.WriteMessage(msg.msgType, msg.data); err != nil {
+			if err := b.writeBackend(msg.msgType, msg.data); err != nil {
 				return nil
 			}
 		default:
@@ -229,15 +264,22 @@ func (b *WSBridge) doSwap(newURL string, clientCh <-chan wsMsg) <-chan wsMsg {
 }
 
 func (b *WSBridge) startBackendReader() <-chan wsMsg {
+	// Cancel any previous reader goroutine.
+	if b.readerCancel != nil {
+		b.readerCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.readerCancel = cancel
+
 	ch := make(chan wsMsg, 8)
-	go wsReadPump(b.backend, ch)
+	go wsReadPump(ctx, b.backend, ch)
 	return ch
 }
 
 func (b *WSBridge) pendingSwap() string {
 	select {
-	case url := <-b.swapCh:
-		return url
+	case u := <-b.swapCh:
+		return u
 	default:
 		return ""
 	}
@@ -267,11 +309,16 @@ func (b *WSBridge) dialBackend(backendURL string) (*websocket.Conn, error) {
 	return conn, nil
 }
 
-// wsReadPump reads messages from conn and sends them to ch until an error occurs.
-func wsReadPump(conn *websocket.Conn, ch chan<- wsMsg) {
+// wsReadPump reads messages from conn and sends them to ch until an error
+// occurs or the context is cancelled.
+func wsReadPump(ctx context.Context, conn *websocket.Conn, ch chan<- wsMsg) {
 	for {
 		mt, data, err := conn.ReadMessage()
-		ch <- wsMsg{mt, data, err}
+		select {
+		case ch <- wsMsg{mt, data, err}:
+		case <-ctx.Done():
+			return
+		}
 		if err != nil {
 			return
 		}

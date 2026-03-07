@@ -17,8 +17,9 @@ type DrainManager struct {
 	connTracker *ConnTracker
 	routingMode string
 	timeout     time.Duration
-	notifier    CacheNotifier // optional, for cross-replica cache invalidation
-	holdMgr     *HoldManager  // optional, holds requests during transitions
+	notifier    CacheNotifier   // optional, for cross-replica cache invalidation
+	holdMgr     *HoldManager    // optional, holds requests during transitions
+	tLock       *TransitionLock // prevents concurrent drain/rebalance
 
 	mu       sync.Mutex
 	draining map[string]context.CancelFunc
@@ -26,7 +27,7 @@ type DrainManager struct {
 
 // NewDrainManager creates a DrainManager.
 // The redis parameter is optional and only used for hash-mode sticky key operations.
-func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration, notifier CacheNotifier, holdMgr *HoldManager) *DrainManager {
+func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache, ct *ConnTracker, routingMode string, timeout time.Duration, notifier CacheNotifier, holdMgr *HoldManager, tLock *TransitionLock) *DrainManager {
 	return &DrainManager{
 		store:       store,
 		redis:       r,
@@ -37,6 +38,7 @@ func NewDrainManager(store Store, r *Redis, hooks *HookClient, cache *UserCache,
 		timeout:     timeout,
 		notifier:    notifier,
 		holdMgr:     holdMgr,
+		tLock:       tLock,
 		draining:    make(map[string]context.CancelFunc),
 	}
 }
@@ -101,6 +103,9 @@ func (d *DrainManager) CancelDrain(backend string) {
 }
 
 func (d *DrainManager) drain(ctx context.Context, backend string) {
+	d.tLock.Lock()
+	defer d.tLock.Unlock()
+
 	var users []string
 	var err error
 	switch {
