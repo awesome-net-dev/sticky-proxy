@@ -196,7 +196,9 @@ func (r *Redis) InvalidateBackend(ctx context.Context, backend string) error {
 				continue // key may have expired between SCAN and GET
 			}
 			if val == backend {
-				r.client.Del(ctx, key)
+				if delErr := r.client.Del(ctx, key).Err(); delErr != nil {
+					slog.Warn("failed to delete sticky key", "key", key, "error", delErr)
+				}
 			}
 		}
 		cursor = next

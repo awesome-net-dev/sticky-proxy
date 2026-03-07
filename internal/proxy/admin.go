@@ -50,12 +50,12 @@ func (p *Proxy) AdminDrainHandler(w http.ResponseWriter, r *http.Request) {
 
 // AdminDrainStatusHandler handles GET /admin/drain.
 func (p *Proxy) AdminDrainStatusHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	if p.drain == nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"draining": []string{}})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"draining": p.drain.DrainingBackends()})
 }
 

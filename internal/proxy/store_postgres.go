@@ -21,6 +21,9 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
 	s := &PostgresStore{db: db}
 	if err := s.migrate(context.Background()); err != nil {
 		_ = db.Close()
