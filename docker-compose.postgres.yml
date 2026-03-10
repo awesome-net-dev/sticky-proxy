@@ -1,22 +1,24 @@
 version: "3.9"
 
 services:
-  redis:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
-    container_name: redis
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
     restart: unless-stopped
-    ulimits:
-      memlock: -1
+    environment:
+      POSTGRES_DB: stickyproxy
+      POSTGRES_USER: stickyproxy
+      POSTGRES_PASSWORD: stickyproxy
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U stickyproxy"]
+      interval: 5s
       timeout: 3s
-      retries: 3
+      retries: 5
     deploy:
       resources:
         limits:
-          memory: 1G
-          cpus: "2"
+          memory: 512M
+          cpus: "1"
 
   backend1:
     build:
@@ -26,9 +28,9 @@ services:
     environment:
       BACKEND_NAME: backend1
       PORT: "5678"
-      REDIS_ADDR: redis:6379
+      POSTGRES_DSN: "postgres://stickyproxy:stickyproxy@postgres:5432/stickyproxy?sslmode=disable"
     depends_on:
-      redis:
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5678/"]
@@ -42,8 +44,6 @@ services:
           memory: 256M
           cpus: "0.5"
 
-
-
   proxy:
     build:
       context: .
@@ -52,16 +52,22 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+      - "6060:6060"
     environment:
-      REDIS_ADDR: "redis:6379"
       JWT_SECRET: "mysecret"
       PROXY_PORT: "8080"
-      ROUTING_MODE: assignment
-      ASSIGNMENT_STORE: redis
-      BACKEND_DISCOVERY: dns
-      BACKEND_DISCOVERY_HOST: backend1
+      ROUTING_MODE: "assignment"
+      ASSIGNMENT_STORE: "postgres"
+      POSTGRES_DSN: "postgres://stickyproxy:stickyproxy@postgres:5432/stickyproxy?sslmode=disable"
+      ACCOUNTS_DISCOVERY: "postgres"
+      ACCOUNTS_QUERY: "SELECT id, weight FROM accounts"
+      ACCOUNTS_REFRESH_INTERVAL: "10s"
+      BACKEND_DISCOVERY: "dns"
+      BACKEND_DISCOVERY_HOST: "backend1"
+      PUBLIC_PATHS: "/login"
+      HOOKS_ENABLED: "true"
     depends_on:
-      redis:
+      postgres:
         condition: service_healthy
       backend1:
         condition: service_healthy

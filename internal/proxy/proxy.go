@@ -263,7 +263,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no backend", http.StatusServiceUnavailable)
 			return
 		}
-		IncCacheHitsRedis()
+		IncCacheHitsStore()
 		p.cache.Set(stickyKey, backend)
 		slog.Debug("assigned backend", "userId", stickyKey, "backend", backend, "mode", p.routingMode)
 		if p.hooks != nil {

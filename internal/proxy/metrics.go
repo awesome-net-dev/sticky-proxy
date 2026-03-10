@@ -20,7 +20,7 @@ var (
 	redisFailures        uint64
 	redisCBFallbacks     uint64
 	cacheHitsLocal       uint64
-	cacheHitsRedis       uint64
+	cacheHitsStore       uint64
 	cacheMisses          uint64
 	authFailures         uint64
 	wsConnections        uint64
@@ -61,8 +61,8 @@ func IncRedisCBFallbacks() { atomic.AddUint64(&redisCBFallbacks, 1) }
 // IncCacheHitsLocal increments stickyproxy_cache_hits_total{layer="local"}.
 func IncCacheHitsLocal() { atomic.AddUint64(&cacheHitsLocal, 1) }
 
-// IncCacheHitsRedis increments stickyproxy_cache_hits_total{layer="redis"}.
-func IncCacheHitsRedis() { atomic.AddUint64(&cacheHitsRedis, 1) }
+// IncCacheHitsStore increments stickyproxy_cache_hits_total{layer="store"}.
+func IncCacheHitsStore() { atomic.AddUint64(&cacheHitsStore, 1) }
 
 // IncCacheMisses increments stickyproxy_cache_misses_total.
 func IncCacheMisses() { atomic.AddUint64(&cacheMisses, 1) }
@@ -219,8 +219,8 @@ func MetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("stickyproxy_cache_hits_total{layer=\"local\"} ")
 	b.WriteString(u64(atomic.LoadUint64(&cacheHitsLocal)))
 	b.WriteByte('\n')
-	b.WriteString("stickyproxy_cache_hits_total{layer=\"redis\"} ")
-	b.WriteString(u64(atomic.LoadUint64(&cacheHitsRedis)))
+	b.WriteString("stickyproxy_cache_hits_total{layer=\"store\"}")
+	b.WriteString(u64(atomic.LoadUint64(&cacheHitsStore)))
 	b.WriteByte('\n')
 
 	writeCounter(&b, "stickyproxy_cache_misses_total",
