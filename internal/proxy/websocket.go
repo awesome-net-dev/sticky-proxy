@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -22,6 +23,15 @@ var wsUpgrader = websocket.Upgrader{
 var wsDialer = &websocket.Dialer{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+}
+
+// wsMsgBufPool provides reusable byte slices for reading WebSocket messages.
+// The initial capacity (4KB) covers most broker messages without growing.
+var wsMsgBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
 }
 
 // proxyWebSocket upgrades the client connection and dials the backend,
@@ -88,8 +98,20 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, backend, routingKey 
 // wsMsg holds a WebSocket message read from a connection.
 type wsMsg struct {
 	msgType int
-	data    []byte
+	data    []byte  // message payload (subslice of pooled buffer)
+	pool    *[]byte // pooled buffer to return after relay; nil for error-only messages
 	err     error
+}
+
+// release returns the message buffer to the pool. Must be called after
+// the message data is no longer needed (i.e. after write completes).
+func (m *wsMsg) release() {
+	if m.pool != nil {
+		*m.pool = (*m.pool)[:0]
+		wsMsgBufPool.Put(m.pool)
+		m.pool = nil
+		m.data = nil
+	}
 }
 
 // WSBridge relays WebSocket traffic between a client and a backend,
@@ -185,7 +207,9 @@ func (b *WSBridge) run() {
 			if msg.err != nil {
 				return
 			}
-			if err := b.writeBackend(msg.msgType, msg.data); err != nil {
+			err := b.writeBackend(msg.msgType, msg.data)
+			msg.release()
+			if err != nil {
 				if newURL := b.pendingSwap(); newURL != "" {
 					if ch := b.doSwap(newURL, clientCh); ch != nil {
 						backendCh = ch
@@ -215,7 +239,9 @@ func (b *WSBridge) run() {
 				}
 				return
 			}
-			if err := b.writeClient(msg.msgType, msg.data); err != nil {
+			err := b.writeClient(msg.msgType, msg.data)
+			msg.release()
+			if err != nil {
 				return
 			}
 
@@ -258,7 +284,9 @@ func (b *WSBridge) doSwap(newURL string, clientCh <-chan wsMsg) <-chan wsMsg {
 			if msg.err != nil {
 				return nil
 			}
-			if err := b.writeBackend(msg.msgType, msg.data); err != nil {
+			err := b.writeBackend(msg.msgType, msg.data)
+			msg.release()
+			if err != nil {
 				return nil
 			}
 		default:
@@ -314,18 +342,67 @@ func (b *WSBridge) dialBackend(backendURL string) (*websocket.Conn, error) {
 	return conn, nil
 }
 
-// wsReadPump reads messages from conn and sends them to ch until an error
-// occurs or the context is cancelled.
+// wsReadPump reads messages from conn using pooled buffers and sends them
+// to ch until an error occurs or the context is cancelled.
 func wsReadPump(ctx context.Context, conn *websocket.Conn, ch chan<- wsMsg) {
 	for {
-		mt, data, err := conn.ReadMessage()
-		select {
-		case ch <- wsMsg{mt, data, err}:
-		case <-ctx.Done():
+		mt, bp, err := wsReadPooled(conn)
+		if err != nil {
+			select {
+			case ch <- wsMsg{msgType: mt, err: err}:
+			case <-ctx.Done():
+			}
 			return
 		}
-		if err != nil {
+		select {
+		case ch <- wsMsg{msgType: mt, data: *bp, pool: bp}:
+		case <-ctx.Done():
+			*bp = (*bp)[:0]
+			wsMsgBufPool.Put(bp)
 			return
+		}
+	}
+}
+
+// wsReadPooled reads a single WebSocket message into a pooled buffer.
+// For messages up to 4KB (typical broker messages), this is zero-alloc.
+// Larger messages cause the buffer to grow; the grown buffer is returned
+// to the pool so subsequent reads on the same connection also benefit.
+func wsReadPooled(conn *websocket.Conn) (int, *[]byte, error) {
+	mt, reader, err := conn.NextReader()
+	if err != nil {
+		return 0, nil, err
+	}
+
+	bp := wsMsgBufPool.Get().(*[]byte)
+	if err := readAllPooled(reader, bp); err != nil {
+		*bp = (*bp)[:0]
+		wsMsgBufPool.Put(bp)
+		return 0, nil, err
+	}
+	return mt, bp, nil
+}
+
+// readAllPooled reads all data from r into the pooled buffer, growing it
+// as needed. On the hot path (message fits in existing capacity), no
+// allocation occurs.
+func readAllPooled(r io.Reader, bp *[]byte) error {
+	b := (*bp)[:0]
+	for {
+		if len(b) == cap(b) {
+			grown := make([]byte, len(b), cap(b)*2+4096)
+			copy(grown, b)
+			b = grown
+		}
+		n, err := r.Read(b[len(b):cap(b)])
+		b = b[:len(b)+n]
+		if err == io.EOF {
+			*bp = b
+			return nil
+		}
+		if err != nil {
+			*bp = b
+			return err
 		}
 	}
 }
