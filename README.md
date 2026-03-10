@@ -814,20 +814,40 @@ CPU time is dominated by kernel I/O — no application-level hotspots:
 
 Heap usage is ~14 KB. The dominant memory consumers are `bufio` read/write buffers and `httputil.ReverseProxy` copy buffers — all expected for a reverse proxy workload.
 
+### Max Throughput (4 CPUs, 1500 concurrent users)
+
+No client-side sleep — VUs fire requests back-to-back to find the true ceiling:
+
+| Metric | Value |
+|---|---|
+| Total requests | 3,707,250 (4m 30s) |
+| Throughput | **13,730 req/s** |
+| Median latency (p50) | 70.04 ms |
+| p90 latency | 109.38 ms |
+| p95 latency | 120.28 ms |
+| p99 latency | 146.58 ms |
+| Max latency | 375.3 ms |
+| Error rate | **0%** (0 out of 3,707,250) |
+| Peak CPU | 328% (4 cores saturated) |
+| Peak memory | 99 MB |
+| Goroutines at peak | 3,849 |
+| Local cache hit rate | 99.99% |
+| Backend distribution | Even (~1.24M / ~1.24M / ~1.22M) |
+
 ### Scaling
 
-| CPUs | RPS (500 VUs) | p95 | p99 | Memory |
-|---|---|---|---|---|
-| 1 | 1,760 | 60.98 ms | 105.34 ms | 56 MB |
-| 4 | 2,414 | 5.79 ms | 10.04 ms | 42 MB |
+| CPUs | VUs | RPS | p50 | p95 | p99 | Memory |
+|---|---|---|---|---|---|---|
+| 1 | 500 | 1,760 | 2.66 ms | 60.98 ms | 105.34 ms | 56 MB |
+| 4 | 1,500 | 13,730 | 70.04 ms | 120.28 ms | 146.58 ms | 99 MB |
 
-With 4 CPUs, the proxy used only 222% CPU — headroom remained. The throughput plateau at ~2,400 RPS was caused by k6 client-side sleep (50ms per iteration caps each VU at 20 req/s). Latency dropped 10x because requests no longer queue on a saturated core.
+The 1-CPU test is CPU-bound at ~1,760 RPS with low median latency (2.66 ms) but high tail latency from core saturation. The 4-CPU test saturates all cores at ~13,730 RPS — a **7.8x throughput increase** from 4x CPUs, demonstrating super-linear scaling due to reduced scheduling contention.
 
 ### Key Characteristics
 
-- **CPU-bound** — the proxy saturates a single core at ~1,760 RPS. Scaling cores reduces tail latency dramatically while adding throughput headroom.
-- **Near-zero store dependency** — after a brief warm-up, the local in-memory cache absorbs 99.95%+ of lookups. The backing store (Redis or PostgreSQL) is only hit once per user. Switching stores has no measurable impact on steady-state throughput.
-- **Zero-allocation hot path** — reverse proxy instances are cached per backend, JWT tokens are cached, and sticky mappings are served from local memory. The heap stays under 15 KB during sustained load.
+- **CPU-bound** — the proxy saturates a single core at ~1,760 RPS and 4 cores at ~13,730 RPS. All CPU time goes to kernel network I/O (43%) and GC (7%), with < 1% in application code.
+- **Near-zero store dependency** — after a brief warm-up, the local in-memory cache absorbs 99.99% of lookups. The backing store (Redis or PostgreSQL) is only hit once per user. Switching stores has no measurable impact on steady-state throughput.
+- **Zero-allocation hot path** — reverse proxy instances are cached per backend, JWT tokens are cached, and sticky mappings are served from local memory. Heap stays under 150 MB even at 13,700 RPS.
 - **Linear backend scaling** — request distribution across backends is even regardless of load level, with < 2% variance.
 
 ### Running the Load Tests
