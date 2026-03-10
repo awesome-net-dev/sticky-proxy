@@ -76,7 +76,11 @@ func New(cfg *config.Config) (*Proxy, error) {
 
 	cache := NewUserCache(cfg.CacheTTL)
 	ct := NewConnTracker()
-	b := NewBackendManager(store, r, cache, cfg.RoutingMode, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks, notifier)
+	b := NewBackendManager(store, r, cache, cfg.RoutingMode, cfg.EvictionThreshold, cfg.EvictionCooldown, hooks, notifier, BackendTransportConfig{
+		MaxConnsPerHost:     cfg.BackendMaxConnsPerHost,
+		MaxIdleConnsPerHost: cfg.BackendMaxIdleConnsPerHost,
+		IdleConnTimeout:     cfg.BackendIdleConnTimeout,
+	})
 	b.Start()
 
 	var holdMgr *HoldManager

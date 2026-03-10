@@ -17,6 +17,7 @@ type BackendManager struct {
 	evictionThreshold int
 	evictionCooldown  time.Duration
 	transport         *http.Transport
+	bufferPool        httputil.BufferPool
 	cache             *UserCache
 	store             Store
 	redis             *Redis // optional, for hash-mode sticky key invalidation
@@ -25,7 +26,46 @@ type BackendManager struct {
 	notifier          CacheNotifier // optional, for cross-replica cache invalidation
 }
 
-func NewBackendManager(store Store, r *Redis, cache *UserCache, routingMode string, evictionThreshold int, evictionCooldown time.Duration, hooks *HookClient, notifier CacheNotifier) *BackendManager {
+// copyBufPool is a sync.Pool-backed BufferPool for httputil.ReverseProxy.
+// It reuses 32KB byte slices to avoid per-request heap allocations.
+type copyBufPool struct {
+	pool sync.Pool
+}
+
+func (p *copyBufPool) Get() []byte {
+	return *(p.pool.Get().(*[]byte))
+}
+
+func (p *copyBufPool) Put(b []byte) {
+	p.pool.Put(&b)
+}
+
+// BackendTransportConfig holds tuning parameters for the HTTP transport used
+// to proxy requests to backends.
+type BackendTransportConfig struct {
+	MaxConnsPerHost     int           // default 500; 0 = unlimited
+	MaxIdleConnsPerHost int           // default 500 (matches MaxConnsPerHost to avoid connection churn)
+	IdleConnTimeout     time.Duration // default 90s
+}
+
+func NewBackendManager(store Store, r *Redis, cache *UserCache, routingMode string, evictionThreshold int, evictionCooldown time.Duration, hooks *HookClient, notifier CacheNotifier, tc BackendTransportConfig) *BackendManager {
+	if tc.MaxConnsPerHost <= 0 {
+		tc.MaxConnsPerHost = 500
+	}
+	if tc.MaxIdleConnsPerHost <= 0 {
+		tc.MaxIdleConnsPerHost = tc.MaxConnsPerHost
+	}
+	if tc.IdleConnTimeout <= 0 {
+		tc.IdleConnTimeout = 90 * time.Second
+	}
+
+	// MaxIdleConns (total) should comfortably exceed per-host idle to avoid
+	// premature connection teardown when many backends are active.
+	maxIdleTotal := tc.MaxIdleConnsPerHost * 10
+	if maxIdleTotal < 1000 {
+		maxIdleTotal = 1000
+	}
+
 	return &BackendManager{
 		evictionThreshold: evictionThreshold,
 		evictionCooldown:  evictionCooldown,
@@ -35,13 +75,20 @@ func NewBackendManager(store Store, r *Redis, cache *UserCache, routingMode stri
 		routingMode:       routingMode,
 		hooks:             hooks,
 		notifier:          notifier,
+		bufferPool: &copyBufPool{pool: sync.Pool{New: func() any {
+			b := make([]byte, 32*1024)
+			return &b
+		}}},
 		transport: &http.Transport{
-			MaxIdleConns:          1000,
-			MaxIdleConnsPerHost:   100,
-			MaxConnsPerHost:       250,
-			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConns:          maxIdleTotal,
+			MaxIdleConnsPerHost:   tc.MaxIdleConnsPerHost,
+			MaxConnsPerHost:       tc.MaxConnsPerHost,
+			IdleConnTimeout:       tc.IdleConnTimeout,
+			DisableCompression:    true,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
+			WriteBufferSize:       4 * 1024,
+			ReadBufferSize:        8 * 1024,
 			DialContext: (&net.Dialer{
 				Timeout:   5 * time.Second,
 				KeepAlive: 30 * time.Second,
@@ -89,6 +136,7 @@ func (b *BackendManager) getOrCreateProxy(backend string) (*httputil.ReverseProx
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = b.transport
+	proxy.BufferPool = b.bufferPool
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
 		b.recordFailure(backend)
 		slog.Error("backend proxy error", "backend", backend, "error", proxyErr)

@@ -10,48 +10,51 @@ import (
 
 // Config holds all configuration values for the sticky-proxy.
 type Config struct {
-	ProxyPort                 string
-	RedisAddr                 string
-	JWTSecret                 string
-	AdminToken                string
-	CacheTTL                  time.Duration
-	RedisPoolSize             int
-	RedisMinIdleConns         int
-	RedisCBThreshold          int
-	RedisCBCooldown           time.Duration
-	JWTCacheMaxSize           int
-	EvictionThreshold         int
-	EvictionCooldown          time.Duration
-	BackendHealthInterval     time.Duration
-	LogFormat                 string
-	RoutingClaim              string
-	HooksEnabled              bool
-	HooksTimeout              time.Duration
-	HooksRetries              int
-	DrainTimeout              time.Duration
-	DrainOnUnhealthy          bool
-	RoutingMode               string
-	AccountsDiscovery         string
-	AccountsQuery             string
-	AccountsRefreshInterval   time.Duration
-	PostgresDSN               string
-	RebalanceStrategy         string
-	RebalanceOnScale          bool
-	BackendDiscovery          string
-	BackendDiscoveryHost      string
-	BackendDiscoveryPort      string
-	BackendDiscoveryInterval  time.Duration
-	BackendDiscoveryNamespace string
-	BackendDiscoverySelector  string
-	BackendDiscoveryPortName  string
-	AssignmentStore           string
-	HoldDuringTransition      bool
-	HoldTimeout               time.Duration
-	WSSwapOnRebalance         bool
-	PoisonPillAction          string
-	PoisonPillThreshold       int
-	PoisonPillWindow          time.Duration
-	PublicPaths               []string
+	ProxyPort                  string
+	RedisAddr                  string
+	JWTSecret                  string
+	AdminToken                 string
+	CacheTTL                   time.Duration
+	RedisPoolSize              int
+	RedisMinIdleConns          int
+	RedisCBThreshold           int
+	RedisCBCooldown            time.Duration
+	JWTCacheMaxSize            int
+	EvictionThreshold          int
+	EvictionCooldown           time.Duration
+	BackendHealthInterval      time.Duration
+	LogFormat                  string
+	RoutingClaim               string
+	HooksEnabled               bool
+	HooksTimeout               time.Duration
+	HooksRetries               int
+	DrainTimeout               time.Duration
+	DrainOnUnhealthy           bool
+	RoutingMode                string
+	AccountsDiscovery          string
+	AccountsQuery              string
+	AccountsRefreshInterval    time.Duration
+	PostgresDSN                string
+	RebalanceStrategy          string
+	RebalanceOnScale           bool
+	BackendDiscovery           string
+	BackendDiscoveryHost       string
+	BackendDiscoveryPort       string
+	BackendDiscoveryInterval   time.Duration
+	BackendDiscoveryNamespace  string
+	BackendDiscoverySelector   string
+	BackendDiscoveryPortName   string
+	AssignmentStore            string
+	HoldDuringTransition       bool
+	HoldTimeout                time.Duration
+	WSSwapOnRebalance          bool
+	PoisonPillAction           string
+	PoisonPillThreshold        int
+	PoisonPillWindow           time.Duration
+	PublicPaths                []string
+	BackendMaxConnsPerHost     int
+	BackendMaxIdleConnsPerHost int
+	BackendIdleConnTimeout     time.Duration
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -307,6 +310,27 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid POISON_PILL_WINDOW: %w", err)
 	}
 	cfg.PoisonPillWindow = ppWindow
+
+	// BACKEND_MAX_CONNS_PER_HOST — default 500
+	backendMaxConns, err := parseInt("BACKEND_MAX_CONNS_PER_HOST", 500)
+	if err != nil {
+		return nil, fmt.Errorf("invalid BACKEND_MAX_CONNS_PER_HOST: %w", err)
+	}
+	cfg.BackendMaxConnsPerHost = backendMaxConns
+
+	// BACKEND_MAX_IDLE_CONNS_PER_HOST — default 0 (matches BACKEND_MAX_CONNS_PER_HOST)
+	backendMaxIdle, err := parseInt("BACKEND_MAX_IDLE_CONNS_PER_HOST", 0)
+	if err != nil {
+		return nil, fmt.Errorf("invalid BACKEND_MAX_IDLE_CONNS_PER_HOST: %w", err)
+	}
+	cfg.BackendMaxIdleConnsPerHost = backendMaxIdle
+
+	// BACKEND_IDLE_CONN_TIMEOUT — default 90s
+	backendIdleTimeout, err := parseDuration("BACKEND_IDLE_CONN_TIMEOUT", 90*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid BACKEND_IDLE_CONN_TIMEOUT: %w", err)
+	}
+	cfg.BackendIdleConnTimeout = backendIdleTimeout
 
 	// PUBLIC_PATHS — comma-separated path prefixes that bypass JWT auth
 	// (e.g. "/login,/register,/oauth"). Requests to these paths are
