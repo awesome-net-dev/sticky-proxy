@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,40 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+}
+
+// brokerPush simulates a message broker by pushing sequential messages to the
+// client at the given rate (messages per second). Each message is a JSON object
+// with a sequence number and timestamp for the client to track throughput and
+// latency. Stops when stopCh is closed (i.e. client disconnects).
+type pushMsg struct {
+	Type    string `json:"type"`
+	Seq     int    `json:"seq"`
+	Ts      int64  `json:"ts"`
+	Backend string `json:"backend"`
+}
+
+func brokerPush(conn *websocket.Conn, mu *sync.Mutex, stopCh <-chan struct{}, backend string, rate int) {
+	interval := time.Second / time.Duration(rate)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	seq := 0
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			seq++
+			data, _ := json.Marshal(pushMsg{Type: "push", Seq: seq, Ts: time.Now().UnixMilli(), Backend: backend})
+			mu.Lock()
+			err := conn.WriteMessage(websocket.TextMessage, data)
+			mu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}
 }
 
 func main() {
@@ -164,7 +199,13 @@ func main() {
 		_, _ = fmt.Fprintf(w, "Hello from %s\n", backendName)
 	})
 
-	// WebSocket handler
+	// WebSocket handler — supports broker simulation.
+	//
+	// Modes:
+	//   Echo (default): responds to each message with "{backend} echo: {msg}".
+	//   Broker sim:     on receiving {"type":"subscribe","rate":N}, pushes N
+	//                   messages/second to the client until disconnect. The
+	//                   client can still send messages; they are echoed back.
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		if oc != nil {
 			if userID := r.Header.Get("X-User-ID"); userID != "" {
@@ -179,23 +220,52 @@ func main() {
 		}
 		defer func() { _ = conn.Close() }()
 
+		// writeMu serializes writes to the WS connection since the broker
+		// goroutine and the read loop both write concurrently.
+		var writeMu sync.Mutex
+		stopBroker := make(chan struct{})
+		brokerStarted := false
+
 		for {
-			mt, message, err := conn.ReadMessage()
+			_, message, err := conn.ReadMessage()
 			if err != nil {
-				slog.Error("websocket read error", "backend", backendName, "error", err)
 				break
 			}
 
+			// Try to parse as JSON command.
+			var cmd struct {
+				Type string `json:"type"`
+				Rate int    `json:"rate"`
+			}
+			if json.Unmarshal(message, &cmd) == nil && cmd.Type == "subscribe" && cmd.Rate > 0 {
+				if brokerStarted {
+					continue // already pushing
+				}
+				brokerStarted = true
+				go brokerPush(conn, &writeMu, stopBroker, backendName, cmd.Rate)
+
+				ack, _ := json.Marshal(map[string]any{"type": "subscribed", "rate": cmd.Rate, "backend": backendName})
+				writeMu.Lock()
+				_ = conn.WriteMessage(websocket.TextMessage, ack)
+				writeMu.Unlock()
+				continue
+			}
+
 			if string(message) == "ping" {
-				_ = conn.WriteMessage(mt, []byte("pong"))
+				writeMu.Lock()
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+				writeMu.Unlock()
 			} else {
 				response := fmt.Sprintf("%s echo: %s", backendName, string(message))
-				if err := conn.WriteMessage(mt, []byte(response)); err != nil {
-					slog.Error("websocket write error", "backend", backendName, "error", err)
+				writeMu.Lock()
+				err = conn.WriteMessage(websocket.TextMessage, []byte(response))
+				writeMu.Unlock()
+				if err != nil {
 					break
 				}
 			}
 		}
+		close(stopBroker)
 	})
 
 	srv := &http.Server{
