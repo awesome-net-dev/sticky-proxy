@@ -285,6 +285,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Set("X-User-ID", stickyKey)
 
 	if isWS {
+		IncBackendRequests(backend)
 		proxyWebSocket(w, r, backend, stickyKey, p.connTracker)
 		return
 	}
