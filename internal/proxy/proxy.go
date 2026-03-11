@@ -304,6 +304,11 @@ func (p *Proxy) StartDiscovery(ctx context.Context) {
 		go p.backendDiscovery.Start(ctx)
 	}
 	if p.discovery != nil {
+		// Synchronous first reconcile ensures all known accounts are
+		// pre-assigned via round-robin before the HTTP server accepts
+		// traffic, preventing the per-request AssignLeastLoaded from
+		// racing with discovery's BulkAssign.
+		p.discovery.SeedAccounts(ctx)
 		go p.discovery.Start(ctx)
 	}
 	if p.notifier != nil {

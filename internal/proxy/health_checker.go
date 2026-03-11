@@ -154,10 +154,13 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 	}
 	wg.Wait()
 
-	// Detect backend set changes and trigger rebalancing.
+	// Detect backend set changes and trigger rebalancing. The check uses
+	// len(currentHealthy) > 0 (not len(previousBackends) > 0) so the first
+	// health check can trigger a rebalance for pre-existing imbalanced
+	// assignments — ComputeMoves is a no-op when everything is balanced.
 	if hc.rebalanceOnScale && hc.rebalancer != nil {
 		currentHealthy := hc.getHealthyBackends()
-		if !stringSliceEqual(hc.previousBackends, currentHealthy) && len(hc.previousBackends) > 0 {
+		if !stringSliceEqual(hc.previousBackends, currentHealthy) && len(currentHealthy) > 0 {
 			hc.rebalancer.Trigger(ctx, currentHealthy)
 		}
 		hc.previousBackends = currentHealthy

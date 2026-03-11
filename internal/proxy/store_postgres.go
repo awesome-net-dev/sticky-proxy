@@ -48,31 +48,81 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_assignments_backend ON assignments(backend);
 		ALTER TABLE assignments ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 1;
+		CREATE TABLE IF NOT EXISTS assignment_counts (
+			backend TEXT PRIMARY KEY,
+			total_weight BIGINT NOT NULL DEFAULT 0
+		);
+		-- Rebuild counts from current state on every startup for consistency.
+		INSERT INTO assignment_counts (backend, total_weight)
+		SELECT b.url, COALESCE(a.w, 0)
+		FROM backends b
+		LEFT JOIN (SELECT backend, SUM(weight) AS w FROM assignments GROUP BY backend) a
+			ON a.backend = b.url
+		WHERE b.healthy = true
+		ON CONFLICT (backend) DO UPDATE SET total_weight = EXCLUDED.total_weight;
 	`)
 	return err
 }
 
 func (s *PostgresStore) AssignLeastLoaded(ctx context.Context, routingKey string) (*Assignment, error) {
-	var a Assignment
-	err := s.db.QueryRowContext(ctx, `
-		WITH target AS (
-			SELECT b.url FROM backends b
-			LEFT JOIN assignments a ON a.backend = b.url
-			WHERE b.healthy = true
-			GROUP BY b.url
-			ORDER BY COALESCE(SUM(a.weight), 0) ASC
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after commit
+
+	// Lock the least-loaded backend row. SKIP LOCKED ensures concurrent
+	// transactions each pick a different backend instead of all selecting
+	// the same one from an identical snapshot.
+	var backend string
+	err = tx.QueryRowContext(ctx, `
+		SELECT ac.backend FROM assignment_counts ac
+		JOIN backends b ON b.url = ac.backend AND b.healthy = true
+		ORDER BY ac.total_weight ASC
+		LIMIT 1
+		FOR UPDATE SKIP LOCKED
+	`).Scan(&backend)
+	if err == sql.ErrNoRows {
+		// All rows locked by concurrent transactions — wait for any lock.
+		err = tx.QueryRowContext(ctx, `
+			SELECT ac.backend FROM assignment_counts ac
+			JOIN backends b ON b.url = ac.backend AND b.healthy = true
+			ORDER BY ac.total_weight ASC
 			LIMIT 1
-		)
+			FOR UPDATE
+		`).Scan(&backend)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var a Assignment
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO assignments (routing_key, backend, source, weight)
-		SELECT $1, url, 'assignment', 1 FROM target
+		VALUES ($1, $2, 'assignment', 1)
 		ON CONFLICT (routing_key) DO NOTHING
 		RETURNING backend, assigned_at, source, weight
-	`, routingKey).Scan(&a.Backend, &a.AssignedAt, &a.Source, &a.Weight)
+	`, routingKey, backend).Scan(&a.Backend, &a.AssignedAt, &a.Source, &a.Weight)
 	if err == sql.ErrNoRows {
-		// Conflict — assignment already exists.
+		// Already assigned — commit to release lock, then fetch existing.
+		if commitErr := tx.Commit(); commitErr != nil {
+			return nil, commitErr
+		}
 		return s.GetAssignment(ctx, routingKey)
 	}
 	if err != nil {
+		return nil, err
+	}
+
+	// Increment the backend's total weight.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE assignment_counts SET total_weight = total_weight + 1
+		WHERE backend = $1
+	`, backend); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -141,6 +191,12 @@ func (s *PostgresStore) BulkAssign(ctx context.Context, assignments map[string]B
 		return nil, nil
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	now := time.Now().UTC()
 
 	// Build multi-row INSERT with parameterized values.
@@ -164,24 +220,46 @@ func (s *PostgresStore) BulkAssign(ctx context.Context, assignments map[string]B
 	}
 	query.WriteString(" ON CONFLICT (routing_key) DO NOTHING RETURNING routing_key, backend")
 
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	rows, err := tx.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		// rows.Close error is non-critical here since we already read all rows.
-		_ = rows.Close()
-	}()
 
 	assigned := make(map[string]string)
+	countDeltas := make(map[string]int)
 	for rows.Next() {
 		var key, backend string
 		if err := rows.Scan(&key, &backend); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		assigned[key] = backend
+		w := assignments[key].Weight
+		if w <= 0 {
+			w = 1
+		}
+		countDeltas[backend] += w
 	}
-	return assigned, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	// Update assignment_counts for newly inserted assignments.
+	for backend, delta := range countDeltas {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE assignment_counts SET total_weight = total_weight + $1
+			WHERE backend = $2
+		`, delta, backend); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return assigned, nil
 }
 
 func (s *PostgresStore) BulkDeleteAssignments(ctx context.Context, routingKeys []string) error {
@@ -189,15 +267,52 @@ func (s *PostgresStore) BulkDeleteAssignments(ctx context.Context, routingKeys [
 		return nil
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	placeholders := make([]string, len(routingKeys))
 	args := make([]any, len(routingKeys))
 	for i, key := range routingKeys {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = key
 	}
-	query := "DELETE FROM assignments WHERE routing_key IN (" + strings.Join(placeholders, ", ") + ")"
-	_, err := s.db.ExecContext(ctx, query, args...)
-	return err
+	query := "DELETE FROM assignments WHERE routing_key IN (" + strings.Join(placeholders, ", ") + ") RETURNING backend, weight"
+
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+
+	countDeltas := make(map[string]int)
+	for rows.Next() {
+		var backend string
+		var weight int
+		if err := rows.Scan(&backend, &weight); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		countDeltas[backend] += weight
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+
+	// Decrement assignment_counts for deleted assignments.
+	for backend, delta := range countDeltas {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE assignment_counts SET total_weight = total_weight - $1
+			WHERE backend = $2
+		`, delta, backend); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (s *PostgresStore) ActiveBackends(ctx context.Context) (backends []string, err error) {
@@ -222,10 +337,15 @@ func (s *PostgresStore) ActiveBackends(ctx context.Context) (backends []string, 
 }
 
 func (s *PostgresStore) AddBackend(ctx context.Context, backend string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO backends (url, healthy) VALUES ($1, true)
-		 ON CONFLICT (url) DO UPDATE SET healthy = true`,
-		backend)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO backends (url, healthy) VALUES ($1, true)
+		ON CONFLICT (url) DO UPDATE SET healthy = true`, backend)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO assignment_counts (backend, total_weight) VALUES ($1, 0)
+		ON CONFLICT (backend) DO NOTHING`, backend)
 	return err
 }
 

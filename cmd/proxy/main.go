@@ -28,10 +28,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start the active health checker and account discovery in the background.
+	// Seed backends and accounts synchronously before the health checker
+	// starts, so the first health check sees the fully populated state
+	// and can trigger rebalancing if the initial distribution is uneven.
 	healthCtx, healthCancel := context.WithCancel(context.Background())
-	go p.HealthChecker.Start(healthCtx)
 	p.StartDiscovery(healthCtx)
+	go p.HealthChecker.Start(healthCtx)
 
 	adminAuth := func(h http.HandlerFunc) http.HandlerFunc {
 		return proxy.AdminAuth(cfg.AdminToken, h)

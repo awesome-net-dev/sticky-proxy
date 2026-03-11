@@ -27,6 +27,7 @@ type AccountDiscovery struct {
 	store    Store
 	hooks    *HookClient
 	stopCh   chan struct{}
+	seeded   bool
 }
 
 // NewAccountDiscovery creates an AccountDiscovery.
@@ -40,9 +41,18 @@ func NewAccountDiscovery(source AccountSource, interval time.Duration, store Sto
 	}
 }
 
+// SeedAccounts performs one synchronous reconciliation so all known
+// accounts are pre-assigned before the HTTP server accepts traffic.
+func (d *AccountDiscovery) SeedAccounts(ctx context.Context) {
+	d.reconcile(ctx)
+	d.seeded = true
+}
+
 // Start runs the discovery loop. Call from a goroutine.
 func (d *AccountDiscovery) Start(ctx context.Context) {
-	d.reconcile(ctx)
+	if !d.seeded {
+		d.reconcile(ctx)
+	}
 
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
