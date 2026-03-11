@@ -15,6 +15,10 @@ import (
 
 // BackendDiscoverer is implemented by backend discovery mechanisms (DNS, Kubernetes).
 type BackendDiscoverer interface {
+	// SeedBackends performs one synchronous discovery cycle to populate the
+	// backends table. Must be called before Start so that account discovery
+	// sees the full backend set when it first runs.
+	SeedBackends(ctx context.Context)
 	Start(ctx context.Context)
 	Stop()
 }
@@ -292,11 +296,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Stop gracefully shuts down background goroutines owned by the proxy.
 // StartDiscovery launches the account discovery loop if configured.
 func (p *Proxy) StartDiscovery(ctx context.Context) {
+	// Seed backends before starting account discovery to prevent
+	// assigning accounts to a partial backend set during startup.
+	if p.backendDiscovery != nil {
+		p.backendDiscovery.SeedBackends(ctx)
+		go p.backendDiscovery.Start(ctx)
+	}
 	if p.discovery != nil {
 		go p.discovery.Start(ctx)
-	}
-	if p.backendDiscovery != nil {
-		go p.backendDiscovery.Start(ctx)
 	}
 	if p.notifier != nil {
 		go subscribeDebouncedNotifier(ctx, p.notifier, p.cache, 100*time.Millisecond)

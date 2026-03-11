@@ -106,6 +106,28 @@ func newKubernetesBackendDiscovery(
 	}
 }
 
+// SeedBackends performs a one-shot list of EndpointSlices and populates the
+// backends table synchronously. This ensures the backend set is complete
+// before account discovery reads it.
+func (k *KubernetesBackendDiscovery) SeedBackends(ctx context.Context) {
+	list, err := k.clientset.DiscoveryV1().EndpointSlices(k.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: k.selector,
+	})
+	if err != nil {
+		slog.Error("kubernetes discovery: seed failed", "error", err)
+		return
+	}
+
+	slices := make([]*discoveryv1.EndpointSlice, len(list.Items))
+	for i := range list.Items {
+		slices[i] = &list.Items[i]
+	}
+
+	desired := k.buildDesiredState(slices)
+	k.applyDesiredState(ctx, desired)
+	slog.Info("kubernetes discovery: seeded backends", "count", len(desired))
+}
+
 // Start sets up the EndpointSlice informer and blocks until ctx is cancelled
 // or Stop is called.
 func (k *KubernetesBackendDiscovery) Start(ctx context.Context) {

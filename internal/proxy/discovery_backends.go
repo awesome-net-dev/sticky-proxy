@@ -33,6 +33,12 @@ func NewBackendDiscovery(host, port string, interval time.Duration, store Store)
 	}
 }
 
+// SeedBackends performs one synchronous DNS reconciliation so the backends
+// table is populated before account discovery reads it.
+func (d *BackendDiscovery) SeedBackends(ctx context.Context) {
+	d.reconcile(ctx)
+}
+
 // Start runs the discovery loop. Call from a goroutine.
 func (d *BackendDiscovery) Start(ctx context.Context) {
 	d.reconcile(ctx)

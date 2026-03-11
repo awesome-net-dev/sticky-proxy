@@ -78,22 +78,45 @@ func (d *AccountDiscovery) reconcile(ctx context.Context) {
 		return
 	}
 
-	var unassigned []DiscoveredAccount
-	for _, acct := range accounts {
-		if _, exists := current[acct.ID]; !exists {
-			unassigned = append(unassigned, acct)
-		}
-	}
-	if len(unassigned) == 0 {
-		return
-	}
-
 	backends, err := d.store.ActiveBackends(ctx)
 	if err != nil || len(backends) == 0 {
 		slog.Error("discovery: no active backends for assignment", "error", err)
 		return
 	}
 	sort.Strings(backends)
+
+	activeSet := make(map[string]struct{}, len(backends))
+	for _, b := range backends {
+		activeSet[b] = struct{}{}
+	}
+
+	var unassigned []DiscoveredAccount
+	var staleKeys []string
+	for _, acct := range accounts {
+		assignment, exists := current[acct.ID]
+		if !exists {
+			unassigned = append(unassigned, acct)
+			continue
+		}
+		// Detect stale assignments pointing to backends that are no longer active.
+		if _, healthy := activeSet[assignment.Backend]; !healthy {
+			staleKeys = append(staleKeys, acct.ID)
+			unassigned = append(unassigned, acct)
+		}
+	}
+
+	// Clean up stale assignments so they can be reassigned.
+	if len(staleKeys) > 0 {
+		if delErr := d.store.BulkDeleteAssignments(ctx, staleKeys); delErr != nil {
+			slog.Error("discovery: failed to delete stale assignments", "error", delErr)
+		} else {
+			slog.Info("discovery: cleaned stale assignments", "count", len(staleKeys))
+		}
+	}
+
+	if len(unassigned) == 0 {
+		return
+	}
 
 	// Round-robin across backends.
 	assignments := make(map[string]BulkAssignEntry, len(unassigned))
