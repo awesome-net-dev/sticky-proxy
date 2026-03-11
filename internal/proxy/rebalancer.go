@@ -200,6 +200,11 @@ func (s *LeastLoadedStrategy) ComputeMoves(assignments map[string]*Assignment, a
 		return nil
 	}
 
+	activeSet := make(map[string]struct{}, len(activeBackends))
+	for _, b := range activeBackends {
+		activeSet[b] = struct{}{}
+	}
+
 	// Sum weight per backend.
 	weights := make(map[string]int, len(activeBackends))
 	for _, b := range activeBackends {
@@ -220,23 +225,59 @@ func (s *LeastLoadedStrategy) ComputeMoves(assignments map[string]*Assignment, a
 		ideal = 1
 	}
 
+	// Track effective weight per backend during planning so that each
+	// move accounts for previously planned donations/receipts.
+	planned := make(map[string]int, len(weights))
+	for b, w := range weights {
+		planned[b] = w
+	}
+
 	var moves []Move
-	// Move users from overloaded backends until weight is within threshold.
 	for backend, users := range backendUsers {
-		excess := weights[backend] - ideal - 1 // threshold of 1
-		if excess <= 0 {
+		// Determine how much weight this backend needs to shed.
+		var excess int
+		if _, active := activeSet[backend]; !active {
+			// Inactive backend: evacuate all users.
+			excess = weights[backend]
+		} else if weights[backend] > ideal+1 {
+			excess = weights[backend] - ideal - 1
+		} else {
 			continue
 		}
+
 		moved := 0
 		for _, user := range users {
 			if moved >= excess {
 				break
 			}
+			w := assignments[user].EffectiveWeight()
+
+			// Pick the most underloaded active backend that can absorb
+			// this user without exceeding ideal+1 (the balance threshold).
+			target := ""
+			minWeight := ideal
+			for _, b := range activeBackends {
+				if planned[b] < minWeight && planned[b]+w <= ideal+1 {
+					minWeight = planned[b]
+					target = b
+				}
+			}
+
+			// Skip users too heavy for any target — moving them would
+			// just shift the overload to the receiver.
+			if target == "" {
+				continue
+			}
+
+			planned[target] += w
+			planned[backend] -= w
+
 			moves = append(moves, Move{
 				RoutingKey:  user,
 				FromBackend: backend,
+				ToBackend:   target,
 			})
-			moved += assignments[user].EffectiveWeight()
+			moved += w
 		}
 	}
 	return moves
