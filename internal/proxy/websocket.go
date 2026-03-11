@@ -118,6 +118,10 @@ func (m *wsMsg) release() {
 // supporting transparent backend swaps. When SwapBackend is called,
 // the old backend connection is closed, a new one is dialed, and relay
 // continues — the client connection stays open throughout.
+//
+// Writes are coalesced through dedicated write-pump goroutines: messages
+// are sent to a channel, and the pump drains as many as available before
+// acquiring the connection mutex once and flushing the batch.
 type WSBridge struct {
 	client     *websocket.Conn
 	clientMu   sync.Mutex // serializes writes to client conn
@@ -126,9 +130,19 @@ type WSBridge struct {
 	path       string
 	rawQuery   string
 
+	// Client write pump (lives for the entire bridge lifetime).
+	clientWriteCh   chan wsMsg
+	clientWriteErr  chan error
+	clientWriteDone chan struct{}
+
 	backend   *websocket.Conn
 	backendMu sync.Mutex  // serializes writes to backend conn
 	swapCh    chan string // buffered(1), receives new backend URL
+
+	// Backend write pump (restarted on each swap).
+	backendWriteCh   chan wsMsg
+	backendWriteErr  chan error
+	backendWriteDone chan struct{}
 
 	// Lifecycle management for reader goroutines.
 	clientCancel context.CancelFunc // cancels client reader goroutine
@@ -137,13 +151,16 @@ type WSBridge struct {
 
 func newWSBridge(client, backend *websocket.Conn, routingKey string, header http.Header, path, rawQuery string) *WSBridge {
 	return &WSBridge{
-		client:     client,
-		routingKey: routingKey,
-		reqHeader:  header,
-		path:       path,
-		rawQuery:   rawQuery,
-		backend:    backend,
-		swapCh:     make(chan string, 1),
+		client:          client,
+		routingKey:      routingKey,
+		reqHeader:       header,
+		path:            path,
+		rawQuery:        rawQuery,
+		clientWriteCh:   make(chan wsMsg, 16),
+		clientWriteErr:  make(chan error, 1),
+		clientWriteDone: make(chan struct{}),
+		backend:         backend,
+		swapCh:          make(chan string, 1),
 	}
 }
 
@@ -170,16 +187,84 @@ func (b *WSBridge) Close() {
 	_ = b.client.Close()
 }
 
-func (b *WSBridge) writeClient(msgType int, data []byte) error {
-	b.clientMu.Lock()
-	defer b.clientMu.Unlock()
-	return b.client.WriteMessage(msgType, data)
+// startBackendWritePump creates channels and launches the backend write pump goroutine.
+func (b *WSBridge) startBackendWritePump() {
+	b.backendWriteCh = make(chan wsMsg, 16)
+	b.backendWriteErr = make(chan error, 1)
+	b.backendWriteDone = make(chan struct{})
+	go wsWritePump(b.backend, &b.backendMu, b.backendWriteCh, b.backendWriteErr, b.backendWriteDone)
 }
 
-func (b *WSBridge) writeBackend(msgType int, data []byte) error {
-	b.backendMu.Lock()
-	defer b.backendMu.Unlock()
-	return b.backend.WriteMessage(msgType, data)
+// stopBackendWritePump signals the backend write pump to stop and drains
+// any buffered messages. Safe to call multiple times.
+func (b *WSBridge) stopBackendWritePump() {
+	if b.backendWriteDone == nil {
+		return
+	}
+	close(b.backendWriteDone)
+	// Drain remaining messages so their pooled buffers are released.
+	for {
+		select {
+		case msg := <-b.backendWriteCh:
+			msg.release()
+		default:
+			b.backendWriteDone = nil
+			return
+		}
+	}
+}
+
+// wsWritePump is a dedicated writer goroutine that coalesces multiple pending
+// messages into a single batch, acquiring the connection mutex once per batch.
+// This reduces mutex contention and syscall overhead under high throughput.
+func wsWritePump(conn *websocket.Conn, mu *sync.Mutex, ch <-chan wsMsg, errCh chan<- error, done <-chan struct{}) {
+	batch := make([]wsMsg, 0, 16)
+	for {
+		// Block until at least one message arrives or we're told to stop.
+		select {
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			batch = append(batch, msg)
+		case <-done:
+			return
+		}
+
+		// Non-blocking drain: grab all additional pending messages.
+	drain:
+		for len(batch) < cap(batch) {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					break drain
+				}
+				batch = append(batch, msg)
+			default:
+				break drain
+			}
+		}
+
+		// Write the entire batch under a single mutex acquisition.
+		mu.Lock()
+		var writeErr error
+		for i := range batch {
+			if writeErr == nil {
+				writeErr = conn.WriteMessage(batch[i].msgType, batch[i].data)
+			}
+			batch[i].release()
+		}
+		mu.Unlock()
+		batch = batch[:0]
+
+		if writeErr != nil {
+			select {
+			case errCh <- writeErr:
+			default:
+			}
+			return
+		}
+	}
 }
 
 func (b *WSBridge) run() {
@@ -188,12 +273,18 @@ func (b *WSBridge) run() {
 
 	defer func() {
 		clientCancel()
+		close(b.clientWriteDone)
+		b.stopBackendWritePump()
 		_ = b.client.Close()
 		_ = b.backend.Close()
 		if b.readerCancel != nil {
 			b.readerCancel()
 		}
 	}()
+
+	// Start write pumps.
+	go wsWritePump(b.client, &b.clientMu, b.clientWriteCh, b.clientWriteErr, b.clientWriteDone)
+	b.startBackendWritePump()
 
 	// Single client reader goroutine for the bridge lifetime.
 	clientCh := make(chan wsMsg, 8)
@@ -207,9 +298,12 @@ func (b *WSBridge) run() {
 			if msg.err != nil {
 				return
 			}
-			err := b.writeBackend(msg.msgType, msg.data)
-			msg.release()
-			if err != nil {
+			// Send to backend write pump (ownership of pooled buffer transfers).
+			select {
+			case b.backendWriteCh <- msg:
+			case err := <-b.backendWriteErr:
+				msg.release()
+				_ = err
 				if newURL := b.pendingSwap(); newURL != "" {
 					if ch := b.doSwap(newURL, clientCh); ch != nil {
 						backendCh = ch
@@ -239,11 +333,26 @@ func (b *WSBridge) run() {
 				}
 				return
 			}
-			err := b.writeClient(msg.msgType, msg.data)
-			msg.release()
-			if err != nil {
+			// Send to client write pump (ownership of pooled buffer transfers).
+			select {
+			case b.clientWriteCh <- msg:
+			case err := <-b.clientWriteErr:
+				msg.release()
+				_ = err
 				return
 			}
+
+		case <-b.backendWriteErr:
+			if newURL := b.pendingSwap(); newURL != "" {
+				if ch := b.doSwap(newURL, clientCh); ch != nil {
+					backendCh = ch
+					continue
+				}
+			}
+			return
+
+		case <-b.clientWriteErr:
+			return
 
 		case newURL := <-b.swapCh:
 			_ = b.backend.Close()
@@ -258,13 +367,17 @@ func (b *WSBridge) run() {
 }
 
 // doSwap dials the new backend, forwards any queued client messages,
-// and starts a new backend reader. Returns the new backend channel, or nil on failure.
+// and starts a new backend reader and write pump. Returns the new backend
+// channel, or nil on failure.
 func (b *WSBridge) doSwap(newURL string, clientCh <-chan wsMsg) <-chan wsMsg {
 	// Cancel the old backend reader goroutine.
 	if b.readerCancel != nil {
 		b.readerCancel()
 		b.readerCancel = nil
 	}
+
+	// Stop old backend write pump.
+	b.stopBackendWritePump()
 
 	newConn, err := b.dialBackend(newURL)
 	if err != nil {
@@ -277,6 +390,9 @@ func (b *WSBridge) doSwap(newURL string, clientCh <-chan wsMsg) <-chan wsMsg {
 	b.backend = newConn
 	b.backendMu.Unlock()
 
+	// Start new backend write pump for the new connection.
+	b.startBackendWritePump()
+
 	// Forward any client messages queued during the swap.
 	for {
 		select {
@@ -284,9 +400,10 @@ func (b *WSBridge) doSwap(newURL string, clientCh <-chan wsMsg) <-chan wsMsg {
 			if msg.err != nil {
 				return nil
 			}
-			err := b.writeBackend(msg.msgType, msg.data)
-			msg.release()
-			if err != nil {
+			select {
+			case b.backendWriteCh <- msg:
+			default:
+				msg.release()
 				return nil
 			}
 		default:
