@@ -165,10 +165,12 @@ type histogram struct {
 
 // RecordRequestDuration records a request latency observation.
 func RecordRequestDuration(seconds float64) {
-	// Increment matching bucket counters (cumulative).
+	// Increment only the tightest matching bucket (non-cumulative storage).
+	// MetricsHandler accumulates into cumulative form on read.
 	for i, bound := range histogramBuckets {
 		if seconds <= bound {
 			atomic.AddUint64(&requestDuration.buckets[i], 1)
+			break
 		}
 	}
 	atomic.AddUint64(&requestDuration.count, 1)
